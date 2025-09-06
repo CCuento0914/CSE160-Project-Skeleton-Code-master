@@ -15,6 +15,7 @@ implementation {
 
     task void search(){
         "logic: send the msg, if somebody responds, save its ID inside table"
+        call neighborTimer.startPeriodic(100+ (call Random.rand16() %300));
     }
 
     event void sendTimer.fired(){
