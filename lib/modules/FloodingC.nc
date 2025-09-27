@@ -1,4 +1,4 @@
-module FloodingC(){
+generic module FloodingC(int channel){
     provides interface Flooding;
 }
 

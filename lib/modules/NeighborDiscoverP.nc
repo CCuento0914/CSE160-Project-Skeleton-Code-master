@@ -1,6 +1,6 @@
 #include <Timer.h>
 
-generic module NeighborDiscoveryP(){
+generic module NeighborDiscoveryP(int channel){
     provides interface NeighborDiscovery;
 
     uses interface Timer<TMilli> as neighborTimer;
