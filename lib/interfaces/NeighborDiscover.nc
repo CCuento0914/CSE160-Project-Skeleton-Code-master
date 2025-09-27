@@ -1,4 +1,4 @@
-interface NeighborDiscovery(
+interface NeighborDiscover{
     command void findNeighbors();
     command void printNeighbors();
-)
+}

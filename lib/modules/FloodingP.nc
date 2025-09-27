@@ -1,13 +1,11 @@
 #include <Timer.h>
 
-generic module FloodingP(int channel) {
+generic module FloodingP() {
     provides interface Flooding;
-
-    uses interface Timer<TMilli> as floodTimer;
-    uses interface Random;
-    uses interface SimpleSend;
 }
 
 implementation {
-    pack* currentPack
+    command void Flooding.FloodTest(){
+        dbg(GENERAL_CHANNEL,"Flood dbg");
+    }
 }

@@ -22,6 +22,8 @@ module Node{
    uses interface SimpleSend as Sender;
 
    uses interface CommandHandler;
+   uses interface Flooding;
+   uses interface NeighborDiscover;
 }
 
 implementation{
@@ -32,7 +34,8 @@ implementation{
 
    event void Boot.booted(){
       call AMControl.start();
-
+      call Flooding.FloodTest();
+      call NeighborDiscover.findNeighbors();
       dbg(GENERAL_CHANNEL, "Booted\n");
    }
 

@@ -30,4 +30,10 @@ implementation {
 
     components CommandHandlerC;
     Node.CommandHandler -> CommandHandlerC;
+
+    components new FloodingC(AM_PACK);
+    Node.Flooding -> FloodingC;
+
+    components new NeighborDiscoverC(AM_PACK);
+    Node.NeighborDiscover -> NeighborDiscoverC;
 }
