@@ -1,8 +1,10 @@
-generic configuration FloodingC(int channel){
-    provides interface Flooding;
+generic configuration FloodingC(am_id_t AMID) {
+  provides interface Flooding;
 }
-
 implementation {
-    components new FloodingP();
-    Flooding = FloodingP.Flooding;
+  components FloodingP;
+  components new SimpleSendC(AMID) as SSC;
+
+  Flooding = FloodingP;
+  FloodingP.Sender -> SSC;
 }

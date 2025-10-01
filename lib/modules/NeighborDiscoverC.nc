@@ -1,19 +1,13 @@
-#include "../../includes/am_types.h"
-
-generic configuration NeighborDiscoverC(int channel){
-    provides interface NeighborDiscover;
+generic configuration NeighborDiscoverC(am_id_t AMID) {
+  provides interface NeighborDiscover;
 }
+implementation {
+  components NeighborDiscoverP;
+  NeighborDiscover = NeighborDiscoverP;
 
-implementation{
-    components new NeighborDiscoverP();
-    NeighborDiscover = NeighborDiscoverP.NeighborDiscover;
+  components new TimerMilliC() as T;
+  NeighborDiscoverP.neighborTimer -> T;
 
-   components new TimerMilliC() as sendTimer;
-   components RandomC as Random;
-   components new SimpleSendC(AM_PACK);
-   
-   NeighborDiscoverP.SimpleSend -> SimpleSendC;
-   NeighborDiscoverP.sendTimer -> sendTimer;
-   NeighborDiscoverP.Random -> Random;
-    
+  components new SimpleSendC(AMID) as SSC;
+  NeighborDiscoverP.Sender -> SSC;
 }

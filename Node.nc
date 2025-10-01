@@ -35,13 +35,14 @@ implementation{
    event void Boot.booted(){
       call AMControl.start();
       call Flooding.FloodTest();
-      call NeighborDiscover.findNeighbors();
+      signal CommandHandler.printNeighbors();
       dbg(GENERAL_CHANNEL, "Booted\n");
    }
 
    event void AMControl.startDone(error_t err){
       if(err == SUCCESS){
          dbg(GENERAL_CHANNEL, "Radio On\n");
+         call NeighborDiscover.findNeighbors();
       }else{
          //Retry until successful
          call AMControl.start();
@@ -54,6 +55,8 @@ implementation{
       dbg(GENERAL_CHANNEL, "Packet Received\n");
       if(len==sizeof(pack)){
          pack* myMsg=(pack*) payload;
+         call NeighborDiscover.Receive(myMsg->src);
+         call Flooding.handleReceive(myMsg);
          dbg(GENERAL_CHANNEL, "Package Payload: %s\n", myMsg->payload);
          return msg;
       }
@@ -68,7 +71,10 @@ implementation{
       call Sender.send(sendPackage, destination);
    }
 
-   event void CommandHandler.printNeighbors(){}
+   event void CommandHandler.printNeighbors(){
+      dbg(GENERAL_CHANNEL, "PRINT NEIGHBORS EVENT \n");
+      call NeighborDiscover.printNeighbors();
+   }
 
    event void CommandHandler.printRouteTable(){}
 
