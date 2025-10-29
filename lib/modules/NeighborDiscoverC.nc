@@ -1,5 +1,6 @@
 generic configuration NeighborDiscoverC(am_id_t AMID) {
   provides interface NeighborDiscover;
+  uses interface LinkState;
 }
 implementation {
   components NeighborDiscoverP;
@@ -10,4 +11,6 @@ implementation {
 
   components new SimpleSendC(AMID) as SSC;
   NeighborDiscoverP.Sender -> SSC;
+
+  NeighborDiscoverP.LinkState = LinkState;
 }

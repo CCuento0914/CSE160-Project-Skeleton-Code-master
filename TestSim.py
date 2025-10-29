@@ -46,7 +46,6 @@ class TestSim:
     # Load a topo file and use it.
     def loadTopo(self, topoFile):
         print 'Creating Topo!'
-        # Read topology file.
         topoFile = 'topo/'+topoFile
         f = open(topoFile, "r")
         self.numMote = int(f.readline());

@@ -36,4 +36,15 @@ implementation {
 
     components new NeighborDiscoverC(AM_PACK);
     Node.NeighborDiscover -> NeighborDiscoverC;
+
+    components LinkStateC;
+    Node.LinkState -> LinkStateC;
+
+    NeighborDiscoverC.LinkState -> LinkStateC;
+    LinkStateC.NeighborDiscover -> NeighborDiscoverC;
+    LinkStateC.Flooding -> FloodingC;
+
+    components IPC;
+    Node.IP -> IPC;
+    IPC.LinkState -> LinkStateC;
 }
