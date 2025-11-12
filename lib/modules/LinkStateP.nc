@@ -12,11 +12,11 @@ module LinkStateP {
 }
 implementation {
   #define MAX_NODES 64
-  #define MAX_NEI 16
+  #define MAX_NEI 16 
   #define INF 0x3FFF
   #define LSA_TTL 30
   #define LSA_DEBOUNCE 5000
-  #define LSA_PERIOD_MS 150000
+  #define LSA_PERIOD_MS 300000 
 
   typedef struct {
     uint16_t origin;
@@ -28,7 +28,7 @@ implementation {
   typedef struct {
     bool used;
     uint16_t seq;
-    uint8_t  ncount;
+    uint8_t ncount;
     uint16_t neigh[MAX_NEI];
   } lsdb_entry_t;
 
@@ -50,14 +50,14 @@ implementation {
   }
 
   static void recompute() { // Dijkstra
-    int  dist[MAX_NODES+1], prev[MAX_NODES+1];
+    int dist[MAX_NODES+1], prev[MAX_NODES+1];
     bool vis [MAX_NODES+1];
-    int  i,j,u,best;
+    int i,j,u,best;
 
-    for (i=0;i<=MAX_NODES;i++){ nextHopTbl[i]=-1; dist[i]=INF; prev[i]=-1; vis[i]=FALSE; }
+    for (i=0; i<=MAX_NODES; i++){ nextHopTbl[i]=-1; dist[i]=INF; prev[i]=-1; vis[i]=FALSE; }
     dist[TOS_NODE_ID]=0;
 
-    for (i=0;i<MAX_NODES;i++){
+    for (i=0; i<MAX_NODES; i++){
       u=-1; best=INF;
       for (j=1;j<=MAX_NODES;j++) if(!vis[j] && dist[j]<best){best=dist[j];u=j;}
       if(u==-1)break;
@@ -66,12 +66,16 @@ implementation {
       for(j=0;j<lsdb[u].ncount;j++){
         uint16_t v=lsdb[u].neigh[j];
         if(!bidir(u,v))continue;
-        if(dist[u]+1<dist[v]){ dist[v]=dist[u]+1; prev[v]=u; }
+        if(dist[u]+1<dist[v]){ 
+          dist[v]=dist[u]+1; 
+          prev[v]=u; 
+          }
       }
     }
-    for (i=1;i<=MAX_NODES;i++){
+    for (i=1; i<=MAX_NODES; i++){
       if(i==TOS_NODE_ID || dist[i]==INF) continue;
-      { int cur=i, pre=prev[i], hop=i;
+      { 
+        int cur=i, pre=prev[i], hop=i;
         while(pre!=-1 && pre!=TOS_NODE_ID){ hop=pre; pre=prev[pre]; }
         if(pre==TOS_NODE_ID) nextHopTbl[i]=hop;
       }
@@ -82,8 +86,9 @@ implementation {
     pack p; lsa_payload_t *lp; uint16_t buf[MAX_NEI]; uint8_t n;
     memset(&p,0,sizeof(pack));
     p.src=TOS_NODE_ID; p.dest=AM_BROADCAST_ADDR;
-    p.TTL=LSA_TTL; p.seq=++mySeq; p.protocol=PROTOCOL_LINKSTATE;
-
+    p.TTL=LSA_TTL; 
+    p.seq=++mySeq; 
+    p.protocol=PROTOCOL_LINKSTATE;
     lp=(lsa_payload_t*)p.payload;
     lp->origin=TOS_NODE_ID; lp->seq=mySeq;
     n = call NeighborDiscover.snapshot(buf, MAX_NEI);
@@ -107,21 +112,15 @@ implementation {
   }
 
   command void LinkState.routeDump() {
-    int i,j;
-    dbg(ROUTING_CHANNEL,"LS DUMP @%u\n", TOS_NODE_ID);
-    for(i=1;i<=MAX_NODES;i++) if(lsdb[i].used){
-      dbg_clear(ROUTING_CHANNEL,"  LSA %u seq=%u:", i, lsdb[i].seq);
-      for(j=0;j<lsdb[i].ncount;j++) dbg_clear(ROUTING_CHANNEL," %u", lsdb[i].neigh[j]);
-      dbg(ROUTING_CHANNEL,"\n");
-    }
+    int i;
     for(i=1;i<=MAX_NODES;i++) if(i!=TOS_NODE_ID && nextHopTbl[i]>=0)
-      dbg(ROUTING_CHANNEL,"  route to %u via %u\n", i, nextHopTbl[i]);
+      dbg(ROUTING_CHANNEL,"route to %u via %u\n", i, nextHopTbl[i]);
   }
 
   command void LinkState.handleLSA(pack *p) {
     lsa_payload_t *lp=(lsa_payload_t*)p->payload;
     uint16_t u = lp->origin;
-    uint8_t  k;
+    uint8_t k;
     if(u==0 || u>MAX_NODES) return;
     if(lsdb[u].used && lp->seq <= lsdb[u].seq) return; 
     k = lp->ncount; if(k>MAX_NEI) k=MAX_NEI;

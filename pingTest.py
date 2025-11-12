@@ -21,14 +21,31 @@ def main():
     s.addChannel(s.GENERAL_CHANNEL);
     s.addChannel(s.FLOODING_CHANNEL);
     s.addChannel(s.NEIGHBOR_CHANNEL);
+    s.addChannel(s.ROUTING_CHANNEL);
 
-    # After sending a ping, simulate a little to prevent collision.
-    s.runTime(1);
-    s.ping(2, 3, "Hello, World");
-    s.runTime(10);
+    # After sending a ping, simulate a little to prevent collision. Project 1
+    #s.runTime(1);
+    #s.ping(2, 3, "Hello, World");
+    #s.runTime(10);    
+    #s.ping(1, 10, "Hi!");
+    #s.runTime(20);
+    
+    # Project 2
+    s.runTime(25);
+    s.ping(18,4, "Test 1");
+    s.runTime(5);
 
-    s.ping(1, 10, "Hi!");
+    s.routeDMP(5);
+    s.runTime(5);
+
+    s.moteOff(6);
     s.runTime(20);
+
+    s.ping(5,10, "Test 2")
+    s.runTime(20);
+    s.routeDMP(7);
+    s.runTime(5);
+
 
 if __name__ == '__main__':
     main()

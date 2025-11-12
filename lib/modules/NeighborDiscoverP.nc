@@ -82,7 +82,7 @@ implementation {
   }
   command uint8_t NeighborDiscover.snapshot(uint16_t *out, uint8_t maxn) {
     uint8_t i, k=0;
-    for (i=0;i<NBR_CAP && k<maxn;i++) {
+    for (i=0; i < NBR_CAP && k < maxn; i++) {
       if (table[i].used) { out[k++] = table[i].id; }
     }
     return k;

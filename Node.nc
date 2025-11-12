@@ -10,6 +10,7 @@
 #include <Timer.h>
 #include <string.h>
 #include <stdint.h>
+#include "includes/socket.h"
 #include "includes/command.h"
 #include "includes/packet.h"
 #include "includes/protocol.h"
@@ -30,10 +31,11 @@ module Node{
    uses interface NeighborDiscover;
    uses interface LinkState;
    uses interface IP;
+   uses interface Transport;
 }
 
 implementation{
-   pack     sendPackage;
+   pack sendPackage;
    uint16_t floodSeq = 1;
    uint16_t pingSeq  = 0;
 
@@ -61,13 +63,12 @@ implementation{
       int16_t nh;
 
       memset(&pkt, 0, sizeof(pack));
-      pkt.src      = TOS_NODE_ID;
-      pkt.dest     = dest; 
-      pkt.TTL      = 30;
-      pkt.seq      = ++pingSeq;
+      pkt.src = TOS_NODE_ID;
+      pkt.dest = dest; 
+      pkt.TTL = 30;
+      pkt.seq = ++pingSeq;
       pkt.protocol = PROTOCOL_PING;
 
-      // Copy payload as C-string (safe-bounded)
       n = 0;
       if (payload) {
          const char *s = (const char*)payload;
@@ -122,7 +123,7 @@ implementation{
 
            case PROTOCOL_PING: {
              if (myMsg->dest == TOS_NODE_ID) {
-               pack reply;  // declare BEFORE any statements in this block
+               pack reply; 
                dbg(GENERAL_CHANNEL, "node %u got '%s' from %u\n",
                    TOS_NODE_ID, (char*)myMsg->payload, myMsg->src);
 
@@ -158,7 +159,11 @@ implementation{
            }
 
            case PROTOCOL_NAME:
-           case PROTOCOL_TCP:
+           case PROTOCOL_TCP: {
+               call Transport.receive(myMsg);
+               break;
+            }
+           
            case PROTOCOL_DV:
            case PROTOCOL_NEIGHBOR:
            case PROTOCOL_CMD: {
@@ -200,8 +205,47 @@ implementation{
    }
    
    event void CommandHandler.printDistanceVector(){}
-   event void CommandHandler.setTestServer(){}
-   event void CommandHandler.setTestClient(){}
+
+   event void CommandHandler.setTestServer(){
+      socket_t s;
+      socket_addr_t me;
+      error_t er;
+      dbg(GENERAL_CHANNEL, "TEST SERVER EVENT\n");
+
+     s = call Transport.socket();
+     if (s == 255) { dbg(TRANSPORT_CHANNEL, "No socket available\n"); return; }
+
+     me.addr = TOS_NODE_ID;   // local node id
+     me.port = 80;            // example server port
+     if (call Transport.bind(s, &me) != SUCCESS) {
+       dbg(TRANSPORT_CHANNEL, "bind failed\n"); return;
+     }
+     if (call Transport.listen(s) != SUCCESS) {
+       dbg(TRANSPORT_CHANNEL, "listen failed\n"); return;
+     }
+     dbg(TRANSPORT_CHANNEL, "Server ready on %u:%u (fd=%u)\n", me.addr, me.port, s);
+   }
+
+   event void CommandHandler.setTestClient(){
+      socket_t c;
+      socket_addr_t me;
+      socket_addr_t srv;
+      error_t er;
+      uint8_t helloBuf[32];
+      uint16_t n;
+      dbg(GENERAL_CHANNEL, "TEST CLIENT EVENT\n");
+
+      c = call Transport.socket();
+      if (c == 255) { dbg(TRANSPORT_CHANNEL, "No client socket\n"); return; }
+
+      srv.addr = 1;  // server node id from your test
+      srv.port = 80; // server port
+
+      if (call Transport.connect(c, &srv) != SUCCESS) {
+         dbg(TRANSPORT_CHANNEL, "connect failed\n"); return;
+      }
+   }
+
    event void CommandHandler.setAppServer(){}
    event void CommandHandler.setAppClient(){}
 
