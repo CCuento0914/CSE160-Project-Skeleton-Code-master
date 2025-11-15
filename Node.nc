@@ -215,8 +215,8 @@ implementation{
      s = call Transport.socket();
      if (s == 255) { dbg(TRANSPORT_CHANNEL, "No socket available\n"); return; }
 
-     me.addr = TOS_NODE_ID;   // local node id
-     me.port = 80;            // example server port
+     me.addr = TOS_NODE_ID;
+     me.port = 80; 
      if (call Transport.bind(s, &me) != SUCCESS) {
        dbg(TRANSPORT_CHANNEL, "bind failed\n"); return;
      }
