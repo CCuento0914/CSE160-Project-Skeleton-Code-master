@@ -15,4 +15,6 @@ implementation {
 
   components IPC;
   TransportP.IP -> IPC;
+
+  //TransportP.retransTimer -> TimerC;
 }

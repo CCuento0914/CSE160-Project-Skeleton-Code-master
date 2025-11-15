@@ -130,10 +130,10 @@ class TestSim:
         print 'Adding Channel', channelName;
         self.t.addChannel(channelName, out);
 
-    def testServer(self, node_id, listen_port=40):
+    def testServer(self, node_id, listen_port=80):
         self.sendCMD(self.CMD_TEST_SERVER, node_id, "{0}".format(chr(listen_port)))
 
-    def testClient(self, node_id, dest_addr=1, dest_port=40, msg="Hello TCP!"):
+    def testClient(self, node_id, dest_addr=1, dest_port=80, msg="Hello TCP!"):
         payload = "{0}{1}{2}".format(chr(dest_addr), chr(dest_port), msg)
         self.sendCMD(self.CMD_TEST_CLIENT, node_id, payload)
 

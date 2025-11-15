@@ -29,6 +29,7 @@ module TransportP {
   uses interface SimpleSend as Sender;
   uses interface LinkState;
   uses interface IP;
+  //uses interface Timer<TMilli> as retransTimer;
 }
 implementation {
   socket_store_t socketTable[MAX_NUM_OF_SOCKETS];

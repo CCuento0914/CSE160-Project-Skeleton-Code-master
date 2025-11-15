@@ -212,18 +212,21 @@ implementation{
       error_t er;
       dbg(GENERAL_CHANNEL, "TEST SERVER EVENT\n");
 
-     s = call Transport.socket();
-     if (s == 255) { dbg(TRANSPORT_CHANNEL, "No socket available\n"); return; }
+      s = call Transport.socket();
+      if (s == 255) { 
+         dbg(TRANSPORT_CHANNEL, "No socket available\n"); 
+         return; 
+      }
 
-     me.addr = TOS_NODE_ID;
-     me.port = 80; 
-     if (call Transport.bind(s, &me) != SUCCESS) {
-       dbg(TRANSPORT_CHANNEL, "bind failed\n"); return;
-     }
-     if (call Transport.listen(s) != SUCCESS) {
-       dbg(TRANSPORT_CHANNEL, "listen failed\n"); return;
-     }
-     dbg(TRANSPORT_CHANNEL, "Server ready on %u:%u (fd=%u)\n", me.addr, me.port, s);
+      me.addr = TOS_NODE_ID;
+      me.port = 80; 
+      if (call Transport.bind(s, &me) != SUCCESS) {
+         dbg(TRANSPORT_CHANNEL, "bind failed\n"); return;
+      }
+      if (call Transport.listen(s) != SUCCESS) {
+         dbg(TRANSPORT_CHANNEL, "listen failed\n"); return;
+      }
+      dbg(TRANSPORT_CHANNEL, "Server ready on %u:%u (fd=%u)\n", me.addr, me.port, s);
    }
 
    event void CommandHandler.setTestClient(){
@@ -238,8 +241,8 @@ implementation{
       c = call Transport.socket();
       if (c == 255) { dbg(TRANSPORT_CHANNEL, "No client socket\n"); return; }
 
-      srv.addr = 1;  // server node id from your test
-      srv.port = 80; // server port
+      srv.addr = 1;
+      srv.port = 80;
 
       if (call Transport.connect(c, &srv) != SUCCESS) {
          dbg(TRANSPORT_CHANNEL, "connect failed\n"); return;
