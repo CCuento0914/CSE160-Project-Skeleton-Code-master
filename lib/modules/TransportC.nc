@@ -16,5 +16,6 @@ implementation {
   components IPC;
   TransportP.IP -> IPC;
 
-  //TransportP.retransTimer -> TimerC;
+  components new TimerMilliC() as TimerC;
+  TransportP.retransTimer -> TimerC;
 }

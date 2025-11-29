@@ -131,11 +131,24 @@ class TestSim:
         self.t.addChannel(channelName, out);
 
     def testServer(self, node_id, listen_port=80):
-        self.sendCMD(self.CMD_TEST_SERVER, node_id, "{0}".format(chr(listen_port)))
+        payload = chr(listen_port & 0xFF)   # Node ignores or uses this as port
+        self.sendCMD(self.CMD_TEST_SERVER, node_id, payload)
 
-    def testClient(self, node_id, dest_addr=1, dest_port=80, msg="Hello TCP!"):
-        payload = "{0}{1}{2}".format(chr(dest_addr), chr(dest_port), msg)
-        self.sendCMD(self.CMD_TEST_CLIENT, node_id, payload)
+
+    def testClient(self, node_id, src_port=40, dest_port=80, transfer=50):
+        client_node = node_id  
+        server_node = 1 
+        transfer = int(transfer)
+        payload = (
+            chr(server_node & 0xFF) +
+            chr(src_port & 0xFF) +
+            chr(dest_port & 0xFF) +
+            chr((transfer >> 8) & 0xFF) +
+            chr(transfer & 0xFF)
+        )
+    
+        # Send the TEST_CLIENT command to the client node (4)
+        self.sendCMD(self.CMD_TEST_CLIENT, client_node, payload)
 
 def main():
     s = TestSim();

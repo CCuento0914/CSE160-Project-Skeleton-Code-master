@@ -32,12 +32,30 @@ module Node{
    uses interface LinkState;
    uses interface IP;
    uses interface Transport;
+   uses interface Timer<TMilli> as ServerTimer;
+   uses interface Timer<TMilli> as ClientTimer;
 }
 
 implementation{
    pack sendPackage;
    uint16_t floodSeq = 1;
    uint16_t pingSeq  = 0;
+   socket_t serverListenFd = 255; // 255 = INVALID_SOCKET
+   socket_t serverClients[MAX_NUM_OF_SOCKETS];
+   uint8_t serverClientCount = 0;
+   socket_t  clientFd = 255;
+   socket_addr_t clientServerAddr;
+   bool clientActive = FALSE;
+   uint8_t cmdServerPort = 80;        // default, will be overwritten by payload
+   uint16_t cmdClientDest = 4;        // server node ID
+   uint8_t  cmdClientSrcPort = 40;
+   uint8_t  cmdClientDestPort = 80;
+   uint16_t cmdClientTransfer = 50;
+
+   // we’ll send a sequence of uint16_t values 0..clientTransferMax
+   uint16_t clientTransferMax = 0;
+   uint16_t clientNextValue = 0;
+   uint16_t clientValuesLeft = 0;
 
    void makePack(pack *Package, uint16_t src, uint16_t dest, uint16_t TTL,
                  uint16_t protocol, uint16_t seq, uint8_t *payload, uint8_t length);
@@ -86,6 +104,109 @@ implementation{
          dbg(ROUTING_CHANNEL, "PING: no route to %u (nh=%d), trying direct\n", pkt.dest, nh);
          call Sender.send(pkt, pkt.dest);
       }
+   }
+
+   event void ServerTimer.fired() {
+     socket_t newFd;
+     uint8_t i;
+     uint16_t n;
+     uint8_t buf[64];
+
+     if (serverListenFd == 255) {
+       // server not running
+       return;
+     }
+
+     // Try to accept a new connection
+     newFd = call Transport.accept(serverListenFd);
+     if (newFd != 255) {
+       if (serverClientCount < MAX_NUM_OF_SOCKETS) {
+         serverClients[serverClientCount++] = newFd;
+         dbg(TRANSPORT_CHANNEL,
+             "Server accepted new connection: fd=%u\n", newFd);
+       } else {
+         dbg(TRANSPORT_CHANNEL,
+             "Server: too many clients, closing fd=%u\n", newFd);
+         call Transport.close(newFd);
+       }
+     }
+
+     // For all accepted sockets: read data and print
+     for (i = 0; i < serverClientCount; i++) {
+       socket_t fd = serverClients[i];
+       n = call Transport.read(fd, buf, sizeof(buf));
+       if (n > 0) {
+         uint16_t j;
+         dbg(TRANSPORT_CHANNEL,
+             "Server read %u bytes from fd=%u: ", n, fd);
+         for (j = 0; j < n; j++) {
+           dbg(TRANSPORT_CHANNEL, "%02x ", buf[j]);
+         }
+         dbg(TRANSPORT_CHANNEL, "\n");
+       }
+     }
+   }
+
+   event void ClientTimer.fired() {
+     uint8_t buf[64];       // send buffer
+     uint16_t maxVals;      // how many uint16s fit in buf
+     uint16_t valsToSend;
+     uint16_t i;
+     uint16_t bytesToSend;
+     uint16_t bytesWritten;
+
+     if (!clientActive || clientFd == 255) {
+       return;
+     }
+
+     // If nothing left to send, stop the timer and optionally close
+     if (clientValuesLeft == 0) {
+       dbg(TRANSPORT_CHANNEL, "Client: all data sent, stopping timer\n");
+       call ClientTimer.stop();
+       // you can also gracefully close here:
+       // call Transport.close(clientFd);
+       clientActive = FALSE;
+       return;
+     }
+
+     // if all data in the buffer has been written or buffer is empty,
+     // create new data for the buffer
+     // data is 16-bit unsigned integers from 0 .. clientTransferMax
+
+     // each uint16_t takes 2 bytes
+     maxVals = sizeof(buf) / 2;
+     valsToSend = clientValuesLeft;
+     if (valsToSend > maxVals) valsToSend = maxVals;
+
+     // Fill buf with valsToSend 16-bit values starting at clientNextValue
+     for (i = 0; i < valsToSend; i++) {
+       uint16_t v = clientNextValue + i;
+       buf[2*i]   = (uint8_t)(v >> 8);   // high byte
+       buf[2*i+1] = (uint8_t)(v & 0xFF); // low byte
+     }
+
+     bytesToSend = (uint16_t)(valsToSend * 2);
+
+     bytesWritten = call Transport.write(clientFd, buf, bytesToSend);
+     if (bytesWritten == 0) {
+       // send buffer/window full or connection not yet ESTABLISHED;
+       // we’ll try again on the next timer.
+       dbg(TRANSPORT_CHANNEL, "Client: write() returned 0, retry later\n");
+       return;
+     }
+
+     // subtract the amount of data you were able to write(fd, buffer, buffer len)
+     {
+       uint16_t valsWritten = bytesWritten / 2;
+       if (valsWritten > clientValuesLeft) valsWritten = clientValuesLeft;
+
+       clientValuesLeft -= valsWritten;
+       clientNextValue  += valsWritten;
+
+       dbg(TRANSPORT_CHANNEL,
+           "Client: wrote %u bytes (%u values), nextValue=%u, left=%u\n",
+           bytesWritten, valsWritten, clientNextValue, clientValuesLeft);
+     }
    }
 
    event void Boot.booted(){
@@ -189,6 +310,13 @@ implementation{
       sendPingTo(destination, payload);
    }
 
+   event void CommandHandler.printRouteTable() {
+      dbg(COMMAND_CHANNEL, "PRINT ROUTETABLE EVENT\n");
+      call LinkState.routeDump();
+   }
+   
+   event void CommandHandler.printDistanceVector(){}
+
    event void CommandHandler.printNeighbors(){
       dbg(GENERAL_CHANNEL, "PRINT NEIGHBORS EVENT \n");
       call NeighborDiscover.printNeighbors();
@@ -199,55 +327,110 @@ implementation{
       call LinkState.routeDump();
    }
 
-   event void CommandHandler.printRouteTable() {
-      dbg(COMMAND_CHANNEL, "PRINT ROUTETABLE EVENT\n");
-      call LinkState.routeDump();
-   }
-   
-   event void CommandHandler.printDistanceVector(){}
-
-   event void CommandHandler.setTestServer(){
+   event void CommandHandler.setTestServer() {
       socket_t s;
       socket_addr_t me;
-      error_t er;
-      dbg(GENERAL_CHANNEL, "TEST SERVER EVENT\n");
+
+      dbg(GENERAL_CHANNEL,"TEST SERVER EVENT\n");
+
+      if (serverListenFd != 255) {
+        dbg(TRANSPORT_CHANNEL,"Server already running on fd=%u\n",serverListenFd);
+        return;
+      }
 
       s = call Transport.socket();
-      if (s == 255) { 
-         dbg(TRANSPORT_CHANNEL, "No socket available\n"); 
-         return; 
+      if (s == 255) {
+        dbg(TRANSPORT_CHANNEL,"No socket available\n");
+        return;
       }
 
       me.addr = TOS_NODE_ID;
-      me.port = 80; 
-      if (call Transport.bind(s, &me) != SUCCESS) {
-         dbg(TRANSPORT_CHANNEL, "bind failed\n"); return;
+      me.port = cmdServerPort;       // <--- from CommandMsg now
+
+      if (call Transport.bind(s,&me)!=SUCCESS) {
+        dbg(TRANSPORT_CHANNEL,"bind failed\n");
+        return;
       }
-      if (call Transport.listen(s) != SUCCESS) {
-         dbg(TRANSPORT_CHANNEL, "listen failed\n"); return;
+      if (call Transport.listen(s)!=SUCCESS) {
+        dbg(TRANSPORT_CHANNEL,"listen failed\n");
+        return;
       }
-      dbg(TRANSPORT_CHANNEL, "Server ready on %u:%u (fd=%u)\n", me.addr, me.port, s);
+
+      serverListenFd = s;
+      serverClientCount = 0;
+
+      dbg(TRANSPORT_CHANNEL,
+          "Server ready on %u:%u (fd=%u)\n",me.addr,me.port,s);
+
+      call ServerTimer.startPeriodic(500);
    }
 
-   event void CommandHandler.setTestClient(){
-      socket_t c;
-      socket_addr_t me;
-      socket_addr_t srv;
-      error_t er;
-      uint8_t helloBuf[32];
-      uint16_t n;
-      dbg(GENERAL_CHANNEL, "TEST CLIENT EVENT\n");
 
-      c = call Transport.socket();
-      if (c == 255) { dbg(TRANSPORT_CHANNEL, "No client socket\n"); return; }
-
-      srv.addr = 1;
-      srv.port = 80;
-
-      if (call Transport.connect(c, &srv) != SUCCESS) {
-         dbg(TRANSPORT_CHANNEL, "connect failed\n"); return;
-      }
+   event void CommandHandler.setTestClient() {
+     socket_addr_t me;
+     error_t e;
+     uint16_t destAddr;
+     uint8_t srcPort;
+     uint8_t destPort;
+     uint16_t transfer;
+   
+     dbg(GENERAL_CHANNEL, "TEST CLIENT EVENT\n");
+   
+     if (clientActive) {
+       dbg(TRANSPORT_CHANNEL, "Client already active (fd=%u)\n", clientFd);
+       return;
+     }
+   
+     // For testA:
+     //   client is running on this node (TOS_NODE_ID, which will be 4)
+     //   server is node 1, listening on port 80
+     destAddr = 1;    // <--- SERVER NODE ID for testA
+     srcPort  = 40;   // client's local port
+     destPort = 80;   // server's listening port
+     transfer = 50;   // send 0..50 (51 values)
+   
+     clientFd = call Transport.socket();
+     if (clientFd == 255) {
+       dbg(TRANSPORT_CHANNEL, "Client: no socket available\n");
+       return;
+     }
+   
+     me.addr = TOS_NODE_ID;   // this node, which will be 4
+     me.port = srcPort;
+     e = call Transport.bind(clientFd, &me);
+     if (e != SUCCESS) {
+       dbg(TRANSPORT_CHANNEL, "Client: bind failed\n");
+       clientFd = 255;
+       return;
+     }
+   
+     clientServerAddr.addr = destAddr;   // 1
+     clientServerAddr.port = destPort;   // 80
+   
+     e = call Transport.connect(clientFd, &clientServerAddr);
+     if (e != SUCCESS) {
+       dbg(TRANSPORT_CHANNEL, "Client: connect() failed\n");
+       clientFd = 255;
+       return;
+     }
+   
+     clientTransferMax = transfer;
+     clientNextValue   = 0;
+     clientValuesLeft  = transfer + 1;   // 0..transfer inclusive
+   
+     clientActive = TRUE;
+   
+     dbg(TRANSPORT_CHANNEL,
+         "Client ready: fd=%u src=%u:%u -> dest=%u:%u transfer=%u values\n",
+         clientFd, me.addr, me.port,
+         clientServerAddr.addr, clientServerAddr.port,
+         clientValuesLeft);
+   
+     call ClientTimer.startPeriodic(500);
    }
+
+
+
 
    event void CommandHandler.setAppServer(){}
    event void CommandHandler.setAppClient(){}
