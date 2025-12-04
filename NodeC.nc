@@ -50,6 +50,7 @@ implementation {
 
     components TransportC;
     Node.Transport -> TransportC;
+    TransportC.IP -> IPC;
 
     components new TimerMilliC() as ServerTimerC;
     Node.ServerTimer -> ServerTimerC;

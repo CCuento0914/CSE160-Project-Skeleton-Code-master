@@ -48,8 +48,8 @@ implementation{
    bool clientActive = FALSE;
    uint8_t cmdServerPort = 80;        // default, will be overwritten by payload
    uint16_t cmdClientDest = 4;        // server node ID
-   uint8_t  cmdClientSrcPort = 40;
-   uint8_t  cmdClientDestPort = 80;
+   uint8_t cmdClientSrcPort = 40;
+   uint8_t cmdClientDestPort = 80;
    uint16_t cmdClientTransfer = 50;
 
    // we’ll send a sequence of uint16_t values 0..clientTransferMax
@@ -102,10 +102,10 @@ implementation{
       nh = call LinkState.nextHop(pkt.dest);
       if (nh > 0) { 
          dbg(ROUTING_CHANNEL, "PING: sending to %u via %d\n", pkt.dest, nh);
-         call Sender.send(pkt, (uint16_t)nh);
+         call IP.forward(&pkt);
       } else {
          dbg(ROUTING_CHANNEL, "PING: no route to %u (nh=%d), trying direct\n", pkt.dest, nh);
-         call Sender.send(pkt, pkt.dest);
+         call IP.forward(&pkt);
       }
    }
 
@@ -114,11 +114,25 @@ implementation{
      uint8_t i;
      uint16_t n;
      uint8_t buf[64];
+     bool already = FALSE;
 
      if (serverListenFd == 255) {
        // server not running
        return;
      }
+
+     for (i = 0; i < serverClientCount; i++) {
+       if (serverClients[i] == newFd) {
+         already = TRUE;
+         break;
+       }
+     }
+     if (!already && serverClientCount < MAX_NUM_OF_SOCKETS) {
+       serverClients[serverClientCount++] = newFd;
+       dbg(TRANSPORT_CHANNEL,
+           "Server accepted new connection: fd=%u\n", newFd);
+     }
+
 
      // Try to accept a new connection
      newFd = call Transport.accept(serverListenFd);
@@ -213,7 +227,13 @@ implementation{
    }
 
    event void Boot.booted(){
+      uint8_t i;
+      serverListenFd = 255;
+      serverClientCount = 0;
       call AMControl.start();
+      for (i = 0; i < MAX_NUM_OF_SOCKETS; i++) {
+          serverClients[i] = 255;
+      }
       dbg(GENERAL_CHANNEL, "Booted\n");
    }
 
@@ -284,8 +304,14 @@ implementation{
 
            case PROTOCOL_NAME:
            case PROTOCOL_TCP: {
-               call Transport.receive(myMsg);
-               break;
+              if (myMsg->dest == TOS_NODE_ID) {
+                // This node is the endpoint: hand to Transport
+                call Transport.receive(myMsg);
+              } else {
+              // This node is just a router: forward via IP
+              call IP.forward(myMsg);
+              }
+              break;
             }
            
            case PROTOCOL_DV:
@@ -330,10 +356,13 @@ implementation{
       call LinkState.routeDump();
    }
 
-     event void CommandHandler.setTestServer() {
+   event void CommandHandler.setTestServer(uint8_t serverPort) {
     socket_addr_t addr;
 
     dbg(TRANSPORT_CHANNEL, "TEST SERVER EVENT\n");
+
+    // Save configuration so client/server timers can use it if needed
+    cmdServerPort = serverPort;
 
     // Create a socket
     testServerFd = call Transport.socket();
@@ -342,9 +371,9 @@ implementation{
       return;
     }
 
-    // Bind it to this node and port 80 (server port for tests)
+    // Bind to this node and the configured port
     addr.addr = TOS_NODE_ID;
-    addr.port = 80;
+    addr.port = cmdServerPort;
 
     if (call Transport.bind(testServerFd, &addr) != SUCCESS) {
       dbg(TRANSPORT_CHANNEL,
@@ -367,27 +396,38 @@ implementation{
     dbg(TRANSPORT_CHANNEL,
         "Test server ready: fd=%u src=%u:%u\n",
         testServerFd, addr.addr, addr.port);
-  }
+}
 
-    event void CommandHandler.setTestClient() {
+
+    event void CommandHandler.setTestClient(uint8_t serverNode, uint8_t clientSrcPort, uint8_t serverPort, uint8_t transferCount) {
       socket_addr_t src;
       socket_addr_t dst;
-      uint8_t buf[51];      // small test payload
-      uint16_t written;
-      uint8_t i;
 
       dbg(TRANSPORT_CHANNEL, "TEST CLIENT EVENT\n");
+
+      // Save config
+      cmdClientDest = serverNode;
+      cmdClientSrcPort = clientSrcPort;
+      cmdClientDestPort = serverPort;
+      cmdClientTransfer = transferCount;
+
+      // how many uint16 values the client timer should send
+      clientTransferMax = cmdClientTransfer;
+      clientNextValue = 0;
+      clientValuesLeft = clientTransferMax;
+      clientActive = TRUE;
 
       // Create a client socket
       testClientFd = call Transport.socket();
       if (testClientFd == 255) {
         dbg(TRANSPORT_CHANNEL, "TestClient: no free socket\n");
+        clientActive = FALSE;
         return;
       }
 
-      // Bind client to a local ephemeral port, e.g., 40
+      // Bind client to local port from payload
       src.addr = TOS_NODE_ID;
-      src.port = 40;
+      src.port = cmdClientSrcPort;
 
       if (call Transport.bind(testClientFd, &src) != SUCCESS) {
         dbg(TRANSPORT_CHANNEL,
@@ -395,14 +435,13 @@ implementation{
             testClientFd, src.addr, src.port);
         call Transport.release(testClientFd);
         testClientFd = 255;
+        clientActive = FALSE;
         return;
       }
 
-      // Set destination to server node and port 80
-      // For TestA/TestB, server node is passed from TestSim (e.g., node 1 or 13),
-      // so the IP layer routes by dest.addr = that node ID.
-      dst.addr = 1;        // <- change to the server node ID if needed
-      dst.port = 80;       // server port
+      // Destination server node + port from payload
+      dst.addr = cmdClientDest;
+      dst.port = cmdClientDestPort;
 
       if (call Transport.connect(testClientFd, &dst) != SUCCESS) {
         dbg(TRANSPORT_CHANNEL,
@@ -410,27 +449,21 @@ implementation{
             testClientFd, dst.addr, dst.port);
         call Transport.release(testClientFd);
         testClientFd = 255;
+        clientActive = FALSE;
         return;
       }
 
       dbg(TRANSPORT_CHANNEL,
-          "Client ready: fd=%u src=%u:%u -> dest=%u:%u transfer=51 values\n",
-          testClientFd, src.addr, src.port, dst.addr, dst.port);
+          "Client ready: fd=%u src=%u:%u -> dest=%u:%u transfer=%u values\n",
+          testClientFd, src.addr, src.port, dst.addr, dst.port,
+          clientTransferMax);
 
-      // Build a simple test payload 0..50
-      for (i = 0; i < 51; i++) {
-        buf[i] = i;
-      }
-
-      // Try a single write (mid-review: just initial data transfer)
-      written = call Transport.write(testClientFd, buf, 51);
-      dbg(TRANSPORT_CHANNEL,
-          "Client: write() returned %u\n", written);
-
-      // Mid-review: simple teardown after one write
-      call Transport.close(testClientFd);
-      testClientFd = 255;
+      // Instead of doing a single write and close here,
+      // let the ClientTimer drive the streaming transfer:
+      clientFd = testClientFd;
+      call ClientTimer.startPeriodic(100);   // or whatever period you used
     }
+
 
 
    event void CommandHandler.setAppServer(){}

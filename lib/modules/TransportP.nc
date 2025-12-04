@@ -33,8 +33,6 @@ typedef nx_struct tcp_hdr_t {
 
 module TransportP {
   provides interface Transport;
-  uses interface SimpleSend as Sender;
-  uses interface LinkState;
   uses interface IP;
   uses interface Timer<TMilli> as retransTimer;
 }
@@ -146,7 +144,7 @@ implementation {
       memcpy(payloadPtr, data, len);
     }
 
-    call Sender.send(pkt, pkt.dest);
+    call IP.forward(&pkt);
 
     dbg(TRANSPORT_CHANNEL,
         "TCP SEND: fd=%u flags=0x%x seq=%u ack=%u len=%u win=%u -> %u:%u\n",
@@ -232,27 +230,33 @@ implementation {
   command error_t Transport.connect(socket_t fd, socket_addr_t* addr) {
     if (fd >= MAX_NUM_OF_SOCKETS) return FAIL;
 
-    // set peer info
     socketTable[fd].dest = *addr;
     socketTable[fd].state = SYN_SENT;
 
-    // init stream indices
-    socketTable[fd].lastSent = 0;
-    socketTable[fd].lastAck = 0;
-    socketTable[fd].lastRcvd = 0;
+    // init stream indices ...
+    socketTable[fd].lastSent    = 0;
+    socketTable[fd].lastAck     = 0;
+    socketTable[fd].lastRcvd    = 0;
     socketTable[fd].nextExpected = 0;
-    lastWritten[fd] = 0;
-    peerWindow[fd] = SOCKET_BUFFER_SIZE;
-    retransActive[fd] = FALSE;
-    parentFd[fd] = INVALID_SOCKET;
+    lastWritten[fd]             = 0;
+    peerWindow[fd]              = SOCKET_BUFFER_SIZE;
+    parentFd[fd]                = INVALID_SOCKET;
 
     dbg(TRANSPORT_CHANNEL, "SOCKET[%u]: Sending SYN -> %u:%u\n",
         fd, addr->addr, addr->port);
 
+    // mark that we have “unacked” control info
+    retransActive[fd] = TRUE;
+
     // SYN has no payload; seq/ack both 0
     sendSegment(fd, TCP_SYN, 0, 0, NULL, 0);
+
+    // start the timer for handshake too
+    call retransTimer.startOneShot(RETRANS_TIMEOUT_MS);
+
     return SUCCESS;
   }
+
 
   command socket_t Transport.accept(socket_t listenFd) {
     uint8_t i;
@@ -271,6 +275,8 @@ implementation {
           socketTable[i].state = ESTABLISHED;
         }
 
+        parentFd[i] = INVALID_SOCKET; // clear parent link
+
         dbg(TRANSPORT_CHANNEL,
             "SOCKET[%u]: Accept returning child fd=%u\n",
             listenFd, i);
@@ -281,76 +287,121 @@ implementation {
   }
 
   event void retransTimer.fired() {
-    uint8_t i;
+  uint8_t i;
+  bool anyPending = FALSE;
 
-    for (i = 0; i < MAX_NUM_OF_SOCKETS; i++) {
-      if (socketTable[i].flag &&
-          socketTable[i].state == ESTABLISHED &&
-          retransActive[i]) {
+  for (i = 0; i < MAX_NUM_OF_SOCKETS; i++) {
+    if (!socketTable[i].flag || !retransActive[i]) continue;
 
+    switch (socketTable[i].state) {
+
+      case SYN_SENT:
+        // handshake client side: SYN unacked
+        dbg(TRANSPORT_CHANNEL,
+            "SOCKET[%u]: timeout waiting for SYN-ACK, retransmitting SYN\n", i);
+        sendSegment(i, TCP_SYN, 0, 0, NULL, 0);
+        anyPending = TRUE;
+        break;
+
+      case SYN_RCVD:
+        // handshake server side: SYN-ACK unacked
+        dbg(TRANSPORT_CHANNEL,
+            "SOCKET[%u]: timeout waiting for ACK, retransmitting SYN-ACK\n", i);
+        // ack = (client seq + 1); used hdr->seq+1 originally
+        // nextExpected currently tracks what we’ve seen from peer; if you don’t
+        // track the client’s SYN seq separately, you can safely keep using 1.
+        sendSegment(i, TCP_SYN | TCP_ACK, 0, 1, NULL, 0);
+        anyPending = TRUE;
+        break;
+
+      case ESTABLISHED: {
+        // your existing data retransmission logic:
         uint8_t inFlight = socketTable[i].lastSent - socketTable[i].lastAck;
         if (inFlight == 0) {
           retransActive[i] = FALSE;
-          continue;
+          break;
         }
-
         dbg(TRANSPORT_CHANNEL,
-            "SOCKET[%u]: timeout, retransmitting %u bytes from %u\n",
+            "SOCKET[%u]: timeout, retransmitting %u bytes starting at %u\n",
             i, inFlight, socketTable[i].lastAck);
 
-        sendSegment(i, TCP_DATA, socketTable[i].lastAck, socketTable[i].nextExpected, &sendBuff[i][socketTable[i].lastAck], inFlight);
-
-        call retransTimer.startOneShot(RETRANS_TIMEOUT_MS);
+        sendSegment(i, TCP_DATA,
+                    socketTable[i].lastAck,
+                    socketTable[i].nextExpected,
+                    &sendBuff[i][socketTable[i].lastAck],
+                    inFlight);
+        anyPending = TRUE;
+        break;
       }
+
+      default:
+        // CLOSED, LISTEN, etc: nothing to retransmit
+        retransActive[i] = FALSE;
+        break;
     }
   }
+
+  // Only restart timer if *something* still needs retransmissions.
+  if (anyPending) {
+    call retransTimer.startOneShot(RETRANS_TIMEOUT_MS);
+  }
+}
 
   command error_t Transport.receive(pack* p) {
     tcp_hdr_t *hdr;
     socket_t fd;
     uint16_t srcAddr = p->src;
-    uint16_t destAddr = p->dest; 
+    uint16_t destAddr = p->dest;
 
+    // Interpret TCP header
     hdr = (tcp_hdr_t*)(void*)p->payload;
 
-    // First see if this belongs to an existing connection
+    // 1) Try to match an existing active connection (4-tuple)
     fd = findActiveSocket(srcAddr, hdr->srcPort, destAddr, hdr->destPort);
 
-    // If no active connection and this is a SYN, try to match a listener
-    if (fd == INVALID_SOCKET && (hdr->flags & TCP_SYN)) {
+    // 2) No active connection and pure SYN -> passive open on server side
+    if (fd == INVALID_SOCKET && (hdr->flags & TCP_SYN) && !(hdr->flags & TCP_ACK)) {
       socket_t listenFd = findListeningSocket(hdr->destPort);
       if (listenFd != INVALID_SOCKET) {
-        // allocate a new child socket for this 4-tuple
+        // allocate a child socket for this 4-tuple
         fd = allocSocketEntry();
         if (fd != INVALID_SOCKET) {
-          socketTable[fd].src = hdr->destPort;  
-          socketTable[fd].dest.addr = srcAddr; 
-          socketTable[fd].dest.port = hdr->srcPort; 
-          socketTable[fd].state = SYN_RCVD;
+          socketTable[fd].src        = hdr->destPort; // local port
+          socketTable[fd].dest.addr  = srcAddr;       // remote addr
+          socketTable[fd].dest.port  = hdr->srcPort;  // remote port
+          socketTable[fd].state      = SYN_RCVD;
 
-          socketTable[fd].lastSent = 0;
-          socketTable[fd].lastAck = 0;
-          socketTable[fd].lastRcvd = 0;
+          socketTable[fd].lastSent     = 0;
+          socketTable[fd].lastAck      = 0;
+          socketTable[fd].lastRcvd     = 0;
           socketTable[fd].nextExpected = 0;
-          lastWritten[fd] = 0;
-          peerWindow[fd] = SOCKET_BUFFER_SIZE;
-          retransActive[fd] = FALSE;
-          parentFd[fd] = listenFd;
+          lastWritten[fd]              = 0;
+          peerWindow[fd]               = SOCKET_BUFFER_SIZE;
+          retransActive[fd]            = FALSE;
+          parentFd[fd]                 = listenFd;
 
-          dbg(TRANSPORT_CHANNEL, "SOCKET[%u]: Got SYN from %u:%u, child fd=%u, sending SYN-ACK\n",
+          dbg(TRANSPORT_CHANNEL,
+              "SOCKET[%u]: Got SYN from %u:%u, child fd=%u, sending SYN-ACK\n",
               listenFd, srcAddr, hdr->srcPort, fd);
 
-          // SYN-ACK: no payload, seq=0, ack=1 (or hdr->seq+1)
+          // SYN-ACK: seq=0, ack = hdr->seq + 1, no data
           sendSegment(fd, TCP_SYN | TCP_ACK, 0, hdr->seq + 1, NULL, 0);
+
+          // (optional) start retransmission timer for the SYN-ACK
+          retransActive[fd] = TRUE;
+          call retransTimer.startOneShot(RETRANS_TIMEOUT_MS);
+
           return SUCCESS;
         }
       }
+
       dbg(TRANSPORT_CHANNEL,
           "RECV: SYN for port %u but no listener or no slots\n",
           hdr->destPort);
       return FAIL;
     }
 
+    // 3) No active connection and not a valid passive-open SYN
     if (fd == INVALID_SOCKET) {
       dbg(TRANSPORT_CHANNEL,
           "RECV: No matching connection for (%u:%u -> %u:%u)\n",
@@ -358,77 +409,83 @@ implementation {
       return FAIL;
     }
 
-    peerWindow[fd] = hdr->window;
-
-    // Update dest info (helpful if we hadn’t filled earlier)
+    // From here on we have a live socket "fd"
+    peerWindow[fd]            = hdr->window;
     socketTable[fd].dest.addr = srcAddr;
     socketTable[fd].dest.port = hdr->srcPort;
 
-    // ---------- handle FLAGS ----------
+    // ---------- FLAG HANDLING ----------
 
-    if (hdr->flags & TCP_SYN) {
-      // Should only see here if we were passive and already in SYN_RCVD
-      // Nothing extra to do; SYN-ACK already sent above.
-      dbg(TRANSPORT_CHANNEL,
-          "SOCKET[%u]: Received extra SYN (ignored)\n", fd);
-    }
-    else if (hdr->flags & TCP_FIN) {
-      dbg(TRANSPORT_CHANNEL, "SOCKET[%u]: Got FIN, sending ACK and closing\n", fd);
-      // ACK the FIN (no data)
-      sendSegment(fd, TCP_ACK, 0, hdr->seq + 1, NULL, 0);
-
-      // Simplified close, free socket immediately
-      socketTable[fd].state = CLOSED;
-      socketTable[fd].flag  = 0;
-      retransActive[fd] = FALSE;
-    }
-    else if (hdr->flags & TCP_ACK) {
-      // ACK for handshake or data
+    // 3-way handshake: client side sees SYN-ACK (SYN | ACK)
+    if ((hdr->flags & TCP_SYN) && (hdr->flags & TCP_ACK)) {
       if (socketTable[fd].state == SYN_SENT) {
         socketTable[fd].state = ESTABLISHED;
         dbg(TRANSPORT_CHANNEL,
-            "SOCKET[%u]: Connection ESTABLISHED (client)\n", fd);
+            "SOCKET[%u]: Connection ESTABLISHED (client, SYN-ACK)\n", fd);
+
+        // Final ACK of 3-way handshake (no data)
+        sendSegment(fd, TCP_ACK,
+                    socketTable[fd].lastSent,   // seq
+                    hdr->seq + 1,               // ack
+                    NULL, 0);
       }
-      else if (socketTable[fd].state == SYN_RCVD) {
+      // If server ever sees SYN|ACK for an existing connection, ignore.
+      return SUCCESS;
+    }
+    else if (hdr->flags & TCP_FIN) {
+      // FIN: close connection
+      dbg(TRANSPORT_CHANNEL,
+          "SOCKET[%u]: Got FIN, sending ACK and closing\n", fd);
+
+      // ACK the FIN (no data)
+      sendSegment(fd, TCP_ACK, 0, hdr->seq + 1, NULL, 0);
+
+      socketTable[fd].state = CLOSED;
+      socketTable[fd].flag  = 0;
+      retransActive[fd]     = FALSE;
+    }
+    else if (hdr->flags & TCP_ACK) {
+      // Handshake ACK or data ACK
+      if (socketTable[fd].state == SYN_RCVD) {
+        // Server side final ACK of handshake
         socketTable[fd].state = ESTABLISHED;
         dbg(TRANSPORT_CHANNEL,
             "SOCKET[%u]: Connection ESTABLISHED (server)\n", fd);
       }
       else if (socketTable[fd].state == ESTABLISHED) {
-        // Data ACK: hdr->ack is next expected byte from sender’s side
+        // Data ACK
         uint8_t oldAck = socketTable[fd].lastAck;
         uint8_t ackVal = hdr->ack;
 
-        // advance lastAck only forward, up to lastSent
+        // Only move forward, and not beyond what we’ve sent
         if (ackVal > socketTable[fd].lastAck &&
             ackVal <= socketTable[fd].lastSent) {
           socketTable[fd].lastAck = ackVal;
-
           dbg(TRANSPORT_CHANNEL,
               "SOCKET[%u]: DATA ACK received ack=%u (from %u)\n",
               fd, ackVal, oldAck);
         }
 
-        // if all data ACKed, we may stop retrans timer
+        // Stop timer if everything is ACKed
         if (socketTable[fd].lastAck == socketTable[fd].lastSent) {
           retransActive[fd] = FALSE;
         }
 
-        // if still unacked data, keep timer running
+        // If there is still unacked data, keep timer running
         if (retransActive[fd]) {
           call retransTimer.startOneShot(RETRANS_TIMEOUT_MS);
         }
 
-        // if app wrote more and window allows, send more
+        // And if the app has more data buffered and window allows, send more
         sendAvailableSegments(fd);
       }
     }
     else if (hdr->flags & TCP_DATA) {
-      // DATA: use seq as byte offset
+      // DATA: seq is byte offset in the stream
       uint16_t len = hdr->length;
       if (len > 0 && len <= DATA_MAX_LEN) {
         if (hdr->seq == socketTable[fd].nextExpected) {
-          // in-order; copy into receive buffer
+          // In-order segment
           uint8_t space = SOCKET_BUFFER_SIZE - socketTable[fd].lastRcvd;
           if (len > space) len = space;
 
@@ -443,19 +500,20 @@ implementation {
               "SOCKET[%u]: DATA in-order (%u bytes) seq=%u nextExpected=%u\n",
               fd, len, hdr->seq, socketTable[fd].nextExpected);
         } else {
-          // out-of-order; ignore data but still ACK last good byte
+          // Simple go-back-N style: ignore out-of-order, keep ACKing last good
           dbg(TRANSPORT_CHANNEL,
               "SOCKET[%u]: DATA out-of-order seq=%u expected=%u (ignored)\n",
               fd, hdr->seq, socketTable[fd].nextExpected);
         }
 
-        // send ACK for every data packet
+        // ACK every data segment with cumulative nextExpected
         sendSegment(fd, TCP_ACK, 0, socketTable[fd].nextExpected, NULL, 0);
       }
     }
 
     return SUCCESS;
   }
+
 
   // Application write(): sliding window & buffering
 

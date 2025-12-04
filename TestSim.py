@@ -13,8 +13,8 @@ class TestSim:
     CMD_PING = 0
     CMD_NEIGHBOR_DUMP = 1
     CMD_ROUTE_DUMP=3
-    CMD_TEST_SERVER=4
-    CMD_TEST_CLIENT=5
+    CMD_TEST_CLIENT=4
+    CMD_TEST_SERVER=5
 
     # CHANNELS - see includes/channels.h
     COMMAND_CHANNEL="command";
@@ -35,6 +35,8 @@ class TestSim:
 
     # Initialize Vars
     numMote=0
+    SERVER_PORT = 80
+    CLIENT_PORT = 40
 
     def __init__(self):
         self.t = Tossim([])
@@ -130,12 +132,24 @@ class TestSim:
         print 'Adding Channel', channelName;
         self.t.addChannel(channelName, out);
 
-    def testServer(self, node_id, listen_port=40):
-        self.sendCMD(self.CMD_TEST_SERVER, node_id, "{0}".format(chr(listen_port)))
+    def testServer(self, serverNode):
+        payload = chr(self.SERVER_PORT)
+        self.sendCMD(self.CMD_TEST_SERVER, serverNode, payload)
 
-    def testClient(self, node_id, dest_addr=1, dest_port=40, msg="Hello TCP!"):
-        payload = "{0}{1}{2}".format(chr(dest_addr), chr(dest_port), msg)
-        self.sendCMD(self.CMD_TEST_CLIENT, node_id, payload)
+    def testClient(self, clientNode):
+        serverNode = 1 
+        clientSrcPort = self.CLIENT_PORT
+        serverPort = self.SERVER_PORT
+        transferCount = 51 
+
+        payload = "".join([
+            chr(serverNode),
+            chr(clientSrcPort),
+            chr(serverPort),
+            chr(transferCount)
+        ])
+
+        self.sendCMD(self.CMD_TEST_CLIENT, clientNode, payload)
 
 def main():
     s = TestSim();
