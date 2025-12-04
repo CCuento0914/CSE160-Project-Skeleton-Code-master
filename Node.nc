@@ -70,10 +70,10 @@ implementation{
 
       nh = call LinkState.nextHop(p->dest);
       if (nh > 0) {
-         call Sender.send(*p, (uint16_t)nh);
+         call IP.forward(p);
       } else {
          dbg(GENERAL_CHANNEL, "FORWARD: no route (nh=%d), trying direct to %u\n", nh, p->dest);
-         call Sender.send(*p, p->dest);
+         call IP.forward(p);
       }
    }
 
@@ -180,15 +180,10 @@ implementation{
      if (clientValuesLeft == 0) {
        dbg(TRANSPORT_CHANNEL, "Client: all data sent, stopping timer\n");
        call ClientTimer.stop();
-       // you can also gracefully close here:
-       // call Transport.close(clientFd);
+       call Transport.close(clientFd);
        clientActive = FALSE;
        return;
      }
-
-     // if all data in the buffer has been written or buffer is empty,
-     // create new data for the buffer
-     // data is 16-bit unsigned integers from 0 .. clientTransferMax
 
      // each uint16_t takes 2 bytes
      maxVals = sizeof(buf) / 2;
@@ -198,8 +193,8 @@ implementation{
      // Fill buf with valsToSend 16-bit values starting at clientNextValue
      for (i = 0; i < valsToSend; i++) {
        uint16_t v = clientNextValue + i;
-       buf[2*i]   = (uint8_t)(v >> 8);   // high byte
-       buf[2*i+1] = (uint8_t)(v & 0xFF); // low byte
+       buf[2*i] = (uint8_t)(v >> 8);
+       buf[2*i+1] = (uint8_t)(v & 0xFF); 
      }
 
      bytesToSend = (uint16_t)(valsToSend * 2);
@@ -208,7 +203,7 @@ implementation{
      if (bytesWritten == 0) {
        // send buffer/window full or connection not yet ESTABLISHED;
        // we’ll try again on the next timer.
-       dbg(TRANSPORT_CHANNEL, "Client: write() returned 0, retry later\n");
+       // dbg(TRANSPORT_CHANNEL, "Client: write() returned 0, retry later\n"); commented out to reduce log spam
        return;
      }
 
@@ -308,8 +303,8 @@ implementation{
                 // This node is the endpoint: hand to Transport
                 call Transport.receive(myMsg);
               } else {
-              // This node is just a router: forward via IP
-              call IP.forward(myMsg);
+                // This node is just a router: forward via IP
+                call IP.forward(myMsg);
               }
               break;
             }
@@ -361,110 +356,95 @@ implementation{
 
     dbg(TRANSPORT_CHANNEL, "TEST SERVER EVENT\n");
 
-    // Save configuration so client/server timers can use it if needed
-    cmdServerPort = serverPort;
-
-    // Create a socket
-    testServerFd = call Transport.socket();
-    if (testServerFd == 255) {
+    // For now we just overwrite.
+    serverListenFd = call Transport.socket();
+    if (serverListenFd == 255) {
       dbg(TRANSPORT_CHANNEL, "TestServer: no free socket\n");
       return;
     }
 
-    // Bind to this node and the configured port
+    // Bind to *this node* and the requested serverPort
     addr.addr = TOS_NODE_ID;
-    addr.port = cmdServerPort;
+    addr.port = serverPort;
 
-    if (call Transport.bind(testServerFd, &addr) != SUCCESS) {
+    if (call Transport.bind(serverListenFd, &addr) != SUCCESS) {
       dbg(TRANSPORT_CHANNEL,
           "TestServer: bind failed for fd=%u on %u:%u\n",
-          testServerFd, addr.addr, addr.port);
-      call Transport.release(testServerFd);
-      testServerFd = 255;
+          serverListenFd, addr.addr, addr.port);
+      call Transport.release(serverListenFd);
+      serverListenFd = 255;
       return;
     }
 
-    // Listen on this socket
-    if (call Transport.listen(testServerFd) != SUCCESS) {
+    if (call Transport.listen(serverListenFd) != SUCCESS) {
       dbg(TRANSPORT_CHANNEL,
-          "TestServer: listen failed for fd=%u\n", testServerFd);
-      call Transport.release(testServerFd);
-      testServerFd = 255;
+          "TestServer: listen failed for fd=%u\n", serverListenFd);
+      call Transport.release(serverListenFd);
+      serverListenFd = 255;
       return;
     }
+
+    // Reset accepted-client list and start polling with ServerTimer
+    serverClientCount = 0;
+    call ServerTimer.startPeriodic(100);
 
     dbg(TRANSPORT_CHANNEL,
         "Test server ready: fd=%u src=%u:%u\n",
-        testServerFd, addr.addr, addr.port);
-}
+        serverListenFd, addr.addr, addr.port);
+  }
 
+   event void CommandHandler.setTestClient(uint8_t serverNode, uint8_t clientSrcPort, uint8_t serverPort, uint8_t transferCount) {
+    socket_addr_t src;
+    socket_addr_t dst;
 
-    event void CommandHandler.setTestClient(uint8_t serverNode, uint8_t clientSrcPort, uint8_t serverPort, uint8_t transferCount) {
-      socket_addr_t src;
-      socket_addr_t dst;
+    dbg(TRANSPORT_CHANNEL, "TEST CLIENT EVENT\n");
 
-      dbg(TRANSPORT_CHANNEL, "TEST CLIENT EVENT\n");
-
-      // Save config
-      cmdClientDest = serverNode;
-      cmdClientSrcPort = clientSrcPort;
-      cmdClientDestPort = serverPort;
-      cmdClientTransfer = transferCount;
-
-      // how many uint16 values the client timer should send
-      clientTransferMax = cmdClientTransfer;
-      clientNextValue = 0;
-      clientValuesLeft = clientTransferMax;
-      clientActive = TRUE;
-
-      // Create a client socket
-      testClientFd = call Transport.socket();
-      if (testClientFd == 255) {
-        dbg(TRANSPORT_CHANNEL, "TestClient: no free socket\n");
-        clientActive = FALSE;
-        return;
-      }
-
-      // Bind client to local port from payload
-      src.addr = TOS_NODE_ID;
-      src.port = cmdClientSrcPort;
-
-      if (call Transport.bind(testClientFd, &src) != SUCCESS) {
-        dbg(TRANSPORT_CHANNEL,
-            "TestClient: bind failed for fd=%u on %u:%u\n",
-            testClientFd, src.addr, src.port);
-        call Transport.release(testClientFd);
-        testClientFd = 255;
-        clientActive = FALSE;
-        return;
-      }
-
-      // Destination server node + port from payload
-      dst.addr = cmdClientDest;
-      dst.port = cmdClientDestPort;
-
-      if (call Transport.connect(testClientFd, &dst) != SUCCESS) {
-        dbg(TRANSPORT_CHANNEL,
-            "TestClient: connect failed for fd=%u -> %u:%u\n",
-            testClientFd, dst.addr, dst.port);
-        call Transport.release(testClientFd);
-        testClientFd = 255;
-        clientActive = FALSE;
-        return;
-      }
-
-      dbg(TRANSPORT_CHANNEL,
-          "Client ready: fd=%u src=%u:%u -> dest=%u:%u transfer=%u values\n",
-          testClientFd, src.addr, src.port, dst.addr, dst.port,
-          clientTransferMax);
-
-      // Instead of doing a single write and close here,
-      // let the ClientTimer drive the streaming transfer:
-      clientFd = testClientFd;
-      call ClientTimer.startPeriodic(100);   // or whatever period you used
+    // Create a client socket
+    clientFd = call Transport.socket();
+    if (clientFd == 255) {
+      dbg(TRANSPORT_CHANNEL, "TestClient: no free socket\n");
+      return;
     }
 
+    // Bind client to local address and requested src port
+    src.addr = TOS_NODE_ID;
+    src.port = clientSrcPort;
 
+    if (call Transport.bind(clientFd, &src) != SUCCESS) {
+      dbg(TRANSPORT_CHANNEL,
+          "TestClient: bind failed for fd=%u on %u:%u\n",
+          clientFd, src.addr, src.port);
+      call Transport.release(clientFd);
+      clientFd = 255;
+      return;
+    }
+
+    // Destination: arbitrary server node + port passed by command
+    dst.addr = serverNode;
+    dst.port = serverPort;
+
+    if (call Transport.connect(clientFd, &dst) != SUCCESS) {
+      dbg(TRANSPORT_CHANNEL,
+          "TestClient: connect failed for fd=%u -> %u:%u\n",
+          clientFd, dst.addr, dst.port);
+      call Transport.release(clientFd);
+      clientFd = 255;
+      return;
+    }
+
+    // Initialize streaming parameters for ClientTimer.fired()
+    clientNextValue = 0;
+    clientValuesLeft = transferCount;
+    clientTransferMax = (transferCount > 0) ? (transferCount - 1) : 0;
+    clientActive = TRUE;
+
+    // Start periodic sends; your ClientTimer.fired() will handle writes
+    call ClientTimer.startPeriodic(100);
+
+    dbg(TRANSPORT_CHANNEL,
+        "Client ready: fd=%u src=%u:%u -> dest=%u:%u transfer=%u values\n",
+        clientFd, src.addr, src.port, dst.addr, dst.port, transferCount);
+  }
 
    event void CommandHandler.setAppServer(){}
    event void CommandHandler.setAppClient(){}

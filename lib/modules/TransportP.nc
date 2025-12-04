@@ -194,12 +194,12 @@ implementation {
       unsent -= segLen;
       retransActive[fd] = TRUE;
 
-      // (re)start retransmission timer whenever we have unacked data
+      // restart retransmission timer whenever we have unacked data
       call retransTimer.startOneShot(RETRANS_TIMEOUT_MS);
     }
   }
 
-  // ---------- public API: socket/bind/listen/connect/accept ----------
+  // ---------- socket/bind/listen/connect/accept ----------
 
   command socket_t Transport.socket() {
     socket_t fd = allocSocketEntry();
@@ -233,14 +233,14 @@ implementation {
     socketTable[fd].dest = *addr;
     socketTable[fd].state = SYN_SENT;
 
-    // init stream indices ...
-    socketTable[fd].lastSent    = 0;
-    socketTable[fd].lastAck     = 0;
-    socketTable[fd].lastRcvd    = 0;
+    // init stream indices
+    socketTable[fd].lastSent = 0;
+    socketTable[fd].lastAck = 0;
+    socketTable[fd].lastRcvd = 0;
     socketTable[fd].nextExpected = 0;
-    lastWritten[fd]             = 0;
-    peerWindow[fd]              = SOCKET_BUFFER_SIZE;
-    parentFd[fd]                = INVALID_SOCKET;
+    lastWritten[fd] = 0;
+    peerWindow[fd] = SOCKET_BUFFER_SIZE;
+    parentFd[fd] = INVALID_SOCKET;
 
     dbg(TRANSPORT_CHANNEL, "SOCKET[%u]: Sending SYN -> %u:%u\n",
         fd, addr->addr, addr->port);
@@ -307,15 +307,11 @@ implementation {
         // handshake server side: SYN-ACK unacked
         dbg(TRANSPORT_CHANNEL,
             "SOCKET[%u]: timeout waiting for ACK, retransmitting SYN-ACK\n", i);
-        // ack = (client seq + 1); used hdr->seq+1 originally
-        // nextExpected currently tracks what we’ve seen from peer; if you don’t
-        // track the client’s SYN seq separately, you can safely keep using 1.
         sendSegment(i, TCP_SYN | TCP_ACK, 0, 1, NULL, 0);
         anyPending = TRUE;
         break;
 
       case ESTABLISHED: {
-        // your existing data retransmission logic:
         uint8_t inFlight = socketTable[i].lastSent - socketTable[i].lastAck;
         if (inFlight == 0) {
           retransActive[i] = FALSE;
@@ -366,19 +362,19 @@ implementation {
         // allocate a child socket for this 4-tuple
         fd = allocSocketEntry();
         if (fd != INVALID_SOCKET) {
-          socketTable[fd].src        = hdr->destPort; // local port
-          socketTable[fd].dest.addr  = srcAddr;       // remote addr
-          socketTable[fd].dest.port  = hdr->srcPort;  // remote port
-          socketTable[fd].state      = SYN_RCVD;
+          socketTable[fd].src = hdr->destPort; // local port
+          socketTable[fd].dest.addr = srcAddr;       // remote addr
+          socketTable[fd].dest.port = hdr->srcPort;  // remote port
+          socketTable[fd].state = SYN_RCVD;
 
-          socketTable[fd].lastSent     = 0;
-          socketTable[fd].lastAck      = 0;
-          socketTable[fd].lastRcvd     = 0;
+          socketTable[fd].lastSent = 0;
+          socketTable[fd].lastAck = 0;
+          socketTable[fd].lastRcvd = 0;
           socketTable[fd].nextExpected = 0;
-          lastWritten[fd]              = 0;
-          peerWindow[fd]               = SOCKET_BUFFER_SIZE;
-          retransActive[fd]            = FALSE;
-          parentFd[fd]                 = listenFd;
+          lastWritten[fd] = 0;
+          peerWindow[fd] = SOCKET_BUFFER_SIZE;
+          retransActive[fd] = FALSE;
+          parentFd[fd] = listenFd;
 
           dbg(TRANSPORT_CHANNEL,
               "SOCKET[%u]: Got SYN from %u:%u, child fd=%u, sending SYN-ACK\n",
@@ -424,10 +420,7 @@ implementation {
             "SOCKET[%u]: Connection ESTABLISHED (client, SYN-ACK)\n", fd);
 
         // Final ACK of 3-way handshake (no data)
-        sendSegment(fd, TCP_ACK,
-                    socketTable[fd].lastSent,   // seq
-                    hdr->seq + 1,               // ack
-                    NULL, 0);
+        sendSegment(fd, TCP_ACK, socketTable[fd].lastSent, hdr->seq + 1, NULL, 0);
       }
       // If server ever sees SYN|ACK for an existing connection, ignore.
       return SUCCESS;
@@ -580,7 +573,7 @@ implementation {
     // FIN: control packet, no data
     sendSegment(fd, TCP_FIN, 0, 0, NULL, 0);
 
-    // simplified: free immediately after sending
+    // free immediately after sending
     socketTable[fd].state = CLOSED;
     socketTable[fd].flag  = 0;
     retransActive[fd] = FALSE;
