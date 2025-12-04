@@ -57,6 +57,9 @@ implementation{
    uint16_t clientNextValue = 0;
    uint16_t clientValuesLeft = 0;
 
+   socket_t testServerFd = 255;
+   socket_t testClientFd = 255;
+
    void makePack(pack *Package, uint16_t src, uint16_t dest, uint16_t TTL,
                  uint16_t protocol, uint16_t seq, uint8_t *payload, uint8_t length);
 
@@ -327,109 +330,107 @@ implementation{
       call LinkState.routeDump();
    }
 
-   event void CommandHandler.setTestServer() {
-      socket_t s;
-      socket_addr_t me;
+     event void CommandHandler.setTestServer() {
+    socket_addr_t addr;
 
-      dbg(GENERAL_CHANNEL,"TEST SERVER EVENT\n");
+    dbg(TRANSPORT_CHANNEL, "TEST SERVER EVENT\n");
 
-      if (serverListenFd != 255) {
-        dbg(TRANSPORT_CHANNEL,"Server already running on fd=%u\n",serverListenFd);
+    // Create a socket
+    testServerFd = call Transport.socket();
+    if (testServerFd == 255) {
+      dbg(TRANSPORT_CHANNEL, "TestServer: no free socket\n");
+      return;
+    }
+
+    // Bind it to this node and port 80 (server port for tests)
+    addr.addr = TOS_NODE_ID;
+    addr.port = 80;
+
+    if (call Transport.bind(testServerFd, &addr) != SUCCESS) {
+      dbg(TRANSPORT_CHANNEL,
+          "TestServer: bind failed for fd=%u on %u:%u\n",
+          testServerFd, addr.addr, addr.port);
+      call Transport.release(testServerFd);
+      testServerFd = 255;
+      return;
+    }
+
+    // Listen on this socket
+    if (call Transport.listen(testServerFd) != SUCCESS) {
+      dbg(TRANSPORT_CHANNEL,
+          "TestServer: listen failed for fd=%u\n", testServerFd);
+      call Transport.release(testServerFd);
+      testServerFd = 255;
+      return;
+    }
+
+    dbg(TRANSPORT_CHANNEL,
+        "Test server ready: fd=%u src=%u:%u\n",
+        testServerFd, addr.addr, addr.port);
+  }
+
+    event void CommandHandler.setTestClient() {
+      socket_addr_t src;
+      socket_addr_t dst;
+      uint8_t buf[51];      // small test payload
+      uint16_t written;
+      uint8_t i;
+
+      dbg(TRANSPORT_CHANNEL, "TEST CLIENT EVENT\n");
+
+      // Create a client socket
+      testClientFd = call Transport.socket();
+      if (testClientFd == 255) {
+        dbg(TRANSPORT_CHANNEL, "TestClient: no free socket\n");
         return;
       }
 
-      s = call Transport.socket();
-      if (s == 255) {
-        dbg(TRANSPORT_CHANNEL,"No socket available\n");
+      // Bind client to a local ephemeral port, e.g., 40
+      src.addr = TOS_NODE_ID;
+      src.port = 40;
+
+      if (call Transport.bind(testClientFd, &src) != SUCCESS) {
+        dbg(TRANSPORT_CHANNEL,
+            "TestClient: bind failed for fd=%u on %u:%u\n",
+            testClientFd, src.addr, src.port);
+        call Transport.release(testClientFd);
+        testClientFd = 255;
         return;
       }
 
-      me.addr = TOS_NODE_ID;
-      me.port = cmdServerPort;       // <--- from CommandMsg now
+      // Set destination to server node and port 80
+      // For TestA/TestB, server node is passed from TestSim (e.g., node 1 or 13),
+      // so the IP layer routes by dest.addr = that node ID.
+      dst.addr = 1;        // <- change to the server node ID if needed
+      dst.port = 80;       // server port
 
-      if (call Transport.bind(s,&me)!=SUCCESS) {
-        dbg(TRANSPORT_CHANNEL,"bind failed\n");
+      if (call Transport.connect(testClientFd, &dst) != SUCCESS) {
+        dbg(TRANSPORT_CHANNEL,
+            "TestClient: connect failed for fd=%u -> %u:%u\n",
+            testClientFd, dst.addr, dst.port);
+        call Transport.release(testClientFd);
+        testClientFd = 255;
         return;
       }
-      if (call Transport.listen(s)!=SUCCESS) {
-        dbg(TRANSPORT_CHANNEL,"listen failed\n");
-        return;
-      }
-
-      serverListenFd = s;
-      serverClientCount = 0;
 
       dbg(TRANSPORT_CHANNEL,
-          "Server ready on %u:%u (fd=%u)\n",me.addr,me.port,s);
+          "Client ready: fd=%u src=%u:%u -> dest=%u:%u transfer=51 values\n",
+          testClientFd, src.addr, src.port, dst.addr, dst.port);
 
-      call ServerTimer.startPeriodic(500);
-   }
+      // Build a simple test payload 0..50
+      for (i = 0; i < 51; i++) {
+        buf[i] = i;
+      }
 
+      // Try a single write (mid-review: just initial data transfer)
+      written = call Transport.write(testClientFd, buf, 51);
+      dbg(TRANSPORT_CHANNEL,
+          "Client: write() returned %u\n", written);
 
-   event void CommandHandler.setTestClient() {
-     socket_addr_t me;
-     error_t e;
-     uint16_t destAddr;
-     uint8_t srcPort;
-     uint8_t destPort;
-     uint16_t transfer;
-   
-     dbg(GENERAL_CHANNEL, "TEST CLIENT EVENT\n");
-   
-     if (clientActive) {
-       dbg(TRANSPORT_CHANNEL, "Client already active (fd=%u)\n", clientFd);
-       return;
-     }
-   
-     // For testA:
-     //   client is running on this node (TOS_NODE_ID, which will be 4)
-     //   server is node 1, listening on port 80
-     destAddr = 1;    // <--- SERVER NODE ID for testA
-     srcPort  = 40;   // client's local port
-     destPort = 80;   // server's listening port
-     transfer = 50;   // send 0..50 (51 values)
-   
-     clientFd = call Transport.socket();
-     if (clientFd == 255) {
-       dbg(TRANSPORT_CHANNEL, "Client: no socket available\n");
-       return;
-     }
-   
-     me.addr = TOS_NODE_ID;   // this node, which will be 4
-     me.port = srcPort;
-     e = call Transport.bind(clientFd, &me);
-     if (e != SUCCESS) {
-       dbg(TRANSPORT_CHANNEL, "Client: bind failed\n");
-       clientFd = 255;
-       return;
-     }
-   
-     clientServerAddr.addr = destAddr;   // 1
-     clientServerAddr.port = destPort;   // 80
-   
-     e = call Transport.connect(clientFd, &clientServerAddr);
-     if (e != SUCCESS) {
-       dbg(TRANSPORT_CHANNEL, "Client: connect() failed\n");
-       clientFd = 255;
-       return;
-     }
-   
-     clientTransferMax = transfer;
-     clientNextValue   = 0;
-     clientValuesLeft  = transfer + 1;   // 0..transfer inclusive
-   
-     clientActive = TRUE;
-   
-     dbg(TRANSPORT_CHANNEL,
-         "Client ready: fd=%u src=%u:%u -> dest=%u:%u transfer=%u values\n",
-         clientFd, me.addr, me.port,
-         clientServerAddr.addr, clientServerAddr.port,
-         clientValuesLeft);
-   
-     call ClientTimer.startPeriodic(500);
-   }
-
-
+      // Mid-review: simple teardown after one write
+      call Transport.close(testClientFd);
+      testClientFd = 255;
+    }
 
 
    event void CommandHandler.setAppServer(){}
