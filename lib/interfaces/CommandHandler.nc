@@ -10,6 +10,12 @@ interface CommandHandler{
                            uint8_t clientSrcPort,
                            uint8_t serverPort,
                            uint8_t transferCount);
+   event void chatStartServer();
+   event void chatStopServer();
+   event void chatHello(uint8_t *payload);
+   event void chatMsg(uint8_t *payload);
+   event void chatWhisper(uint8_t *payload);
+   event void chatListUsr();
    event void setAppServer();
    event void setAppClient();
 }

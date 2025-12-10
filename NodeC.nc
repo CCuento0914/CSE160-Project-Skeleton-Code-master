@@ -57,4 +57,8 @@ implementation {
 
     components new TimerMilliC() as ClientTimerC;
     Node.ClientTimer -> ClientTimerC;
+
+    components ChatServerC;
+    Node.ChatServer -> ChatServerC;
+    ChatServerC.Transport -> TransportC;
 }

@@ -32,6 +32,7 @@ module Node{
    uses interface LinkState;
    uses interface IP;
    uses interface Transport;
+   uses interface ChatServer;
    uses interface Timer<TMilli> as ServerTimer;
    uses interface Timer<TMilli> as ClientTimer;
 }
@@ -40,14 +41,14 @@ implementation{
    pack sendPackage;
    uint16_t floodSeq = 1;
    uint16_t pingSeq  = 0;
-   socket_t serverListenFd = 255; // 255 = INVALID_SOCKET
+   socket_t serverListenFd = 255; 
    socket_t serverClients[MAX_NUM_OF_SOCKETS];
    uint8_t serverClientCount = 0;
    socket_t  clientFd = 255;
    socket_addr_t clientServerAddr;
    bool clientActive = FALSE;
-   uint8_t cmdServerPort = 80;        // default, will be overwritten by payload
-   uint16_t cmdClientDest = 4;        // server node ID
+   uint8_t cmdServerPort = 80; 
+   uint16_t cmdClientDest = 4;
    uint8_t cmdClientSrcPort = 40;
    uint8_t cmdClientDestPort = 80;
    uint16_t cmdClientTransfer = 50;
@@ -59,6 +60,9 @@ implementation{
 
    socket_t testServerFd = 255;
    socket_t testClientFd = 255;
+
+   socket_t appClientFd = 255;
+   socket_addr_t appServerAddr;
 
    void makePack(pack *Package, uint16_t src, uint16_t dest, uint16_t TTL,
                  uint16_t protocol, uint16_t seq, uint8_t *payload, uint8_t length);
@@ -446,8 +450,145 @@ implementation{
         clientFd, src.addr, src.port, dst.addr, dst.port, transferCount);
   }
 
-   event void CommandHandler.setAppServer(){}
-   event void CommandHandler.setAppClient(){}
+  event void CommandHandler.chatStartServer() {
+    uint8_t port = 41;
+    dbg(TRANSPORT_CHANNEL,
+        "CHAT CMD: start server on port %u\n", port);
+    call ChatServer.start(port);
+  }
+
+  event void CommandHandler.chatStopServer() {
+    dbg(TRANSPORT_CHANNEL, "CHAT CMD: stop server\n");
+    call ChatServer.stop();
+  }
+
+  event void CommandHandler.chatHello(uint8_t *payload) {
+    dbg(TRANSPORT_CHANNEL, "CHAT CMD: hello '%s'\n", (char*)payload);
+    call ChatServer.chatHello(payload);
+  }
+
+  event void CommandHandler.chatMsg(uint8_t *payload) {
+    dbg(TRANSPORT_CHANNEL, "CHAT CMD: msg '%s'\n", (char*)payload);
+    call ChatServer.chatMsg(payload);
+  }
+
+  event void CommandHandler.chatWhisper(uint8_t *payload) {
+    dbg(TRANSPORT_CHANNEL, "CHAT CMD: whisper '%s'\n", (char*)payload);
+    call ChatServer.chatWhisper(payload);
+  }
+
+  event void CommandHandler.chatListUsr() {
+    dbg(TRANSPORT_CHANNEL, "CHAT CMD: listusr\n");
+    call ChatServer.chatListUsr();
+  }
+
+  event void CommandHandler.setAppServer(){
+    dbg(TRANSPORT_CHANNEL, "APP SERVER EVENT\n");
+    call ChatServer.start(41);
+  }
+
+  event void CommandHandler.setAppClient() {
+    socket_addr_t src;
+    socket_addr_t dst;
+    uint8_t helloBuf[32];
+    uint8_t len = 0;
+
+    dbg(TRANSPORT_CHANNEL, "APP CLIENT EVENT\n");
+
+    // If there was an old app client socket, close it.
+    if (appClientFd != 255) {
+      call Transport.close(appClientFd);
+      appClientFd = 255;
+    }
+
+    // Create a new socket
+    appClientFd = call Transport.socket();
+    if (appClientFd == 255) {
+      dbg(TRANSPORT_CHANNEL, "AppClient: no free socket\n");
+      return;
+    }
+
+    // Bind to this node on a fixed "chat client" port (pick any not already used)
+    src.addr = TOS_NODE_ID;
+    src.port = 41;   // chat client port; just avoid 40/80 used by tests
+
+    if (call Transport.bind(appClientFd, &src) != SUCCESS) {
+      dbg(TRANSPORT_CHANNEL,
+          "AppClient: bind failed for fd=%u on %u:%u\n",
+          appClientFd, src.addr, src.port);
+      call Transport.release(appClientFd);
+      appClientFd = 255;
+      return;
+    }
+
+    // Destination = chat server node and port.
+    // Make sure this matches where you start the ChatServer
+    // (CommandHandler.setAppServer uses ChatServer.start(80), so use port 80 here).
+    dst.addr = 1;    // chat server node ID
+    dst.port = 80;   // chat server port
+
+    if (call Transport.connect(appClientFd, &dst) != SUCCESS) {
+      dbg(TRANSPORT_CHANNEL,
+          "AppClient: connect failed for fd=%u -> %u:%u\n",
+          appClientFd, dst.addr, dst.port);
+      call Transport.release(appClientFd);
+      appClientFd = 255;
+      return;
+    }
+
+    appServerAddr = dst;
+
+    // Build a simple "hello <username>\r\n" message.
+    // Username = "node<id>" (e.g., node4, node13)
+    {
+      uint8_t id = TOS_NODE_ID;
+      char name[8];   // "node" + up to 3 digits + '\0'
+      uint8_t npos = 0;
+      uint8_t i;
+
+      name[npos++] = 'n';
+      name[npos++] = 'o';
+      name[npos++] = 'd';
+      name[npos++] = 'e';
+
+      // Add decimal representation of TOS_NODE_ID
+      if (id >= 100) {
+        name[npos++] = '0' + (id / 100) % 10;
+      }
+      if (id >= 10) {
+        name[npos++] = '0' + (id / 10) % 10;
+      }
+      name[npos++] = '0' + (id % 10);
+      name[npos]   = '\0';
+
+      // "hello "
+      helloBuf[len++] = 'h';
+      helloBuf[len++] = 'e';
+      helloBuf[len++] = 'l';
+      helloBuf[len++] = 'l';
+      helloBuf[len++] = 'o';
+      helloBuf[len++] = ' ';
+
+      // copy username
+      i = 0;
+      while (name[i] != '\0' && len < sizeof(helloBuf) - 3) {
+        helloBuf[len++] = (uint8_t)name[i++];
+      }
+
+      // "\r\n" terminator
+      if (len < sizeof(helloBuf) - 2) {
+        helloBuf[len++] = '\r';
+        helloBuf[len++] = '\n';
+      }
+    }
+
+    (void)call Transport.write(appClientFd, helloBuf, len);
+
+    dbg(TRANSPORT_CHANNEL,
+        "AppClient: connected fd=%u src=%u:%u -> dest=%u:%u, sent HELLO (len=%u)\n",
+        appClientFd, src.addr, src.port, dst.addr, dst.port, len);
+  }
+
 
    void makePack(pack *Package, uint16_t src, uint16_t dest, uint16_t TTL, uint16_t protocol, uint16_t seq, uint8_t* payload, uint8_t length){
       Package->src = src;
