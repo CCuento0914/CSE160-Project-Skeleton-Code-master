@@ -61,4 +61,8 @@ implementation {
     components ChatServerC;
     Node.ChatServer -> ChatServerC;
     ChatServerC.Transport -> TransportC;
+
+    components ChatClientC;
+    Node.ChatClient -> ChatClientC;
+    ChatClientC.Transport -> TransportC;
 }

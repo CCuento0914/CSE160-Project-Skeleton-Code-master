@@ -146,10 +146,11 @@ implementation {
 
     call IP.forward(&pkt);
 
-    dbg(TRANSPORT_CHANNEL,
+    /* dbg(TRANSPORT_CHANNEL,
         "TCP SEND: fd=%u flags=0x%x seq=%u ack=%u len=%u win=%u -> %u:%u\n",
         fd, flags, hdr->seq, hdr->ack, len, hdr->window,
         pkt.dest, hdr->destPort);
+    */
   }
 
   // ---------- sliding window sender: send as many segments as allowed ----------
@@ -297,16 +298,14 @@ implementation {
 
       case SYN_SENT:
         // handshake client side: SYN unacked
-        dbg(TRANSPORT_CHANNEL,
-            "SOCKET[%u]: timeout waiting for SYN-ACK, retransmitting SYN\n", i);
+        // dbg(TRANSPORT_CHANNEL, "SOCKET[%u]: timeout waiting for SYN-ACK, retransmitting SYN\n", i);
         sendSegment(i, TCP_SYN, 0, 0, NULL, 0);
         anyPending = TRUE;
         break;
 
       case SYN_RCVD:
         // handshake server side: SYN-ACK unacked
-        dbg(TRANSPORT_CHANNEL,
-            "SOCKET[%u]: timeout waiting for ACK, retransmitting SYN-ACK\n", i);
+        // dbg(TRANSPORT_CHANNEL, "SOCKET[%u]: timeout waiting for ACK, retransmitting SYN-ACK\n", i);
         sendSegment(i, TCP_SYN | TCP_ACK, 0, 1, NULL, 0);
         anyPending = TRUE;
         break;
@@ -317,9 +316,7 @@ implementation {
           retransActive[i] = FALSE;
           break;
         }
-        dbg(TRANSPORT_CHANNEL,
-            "SOCKET[%u]: timeout, retransmitting %u bytes starting at %u\n",
-            i, inFlight, socketTable[i].lastAck);
+        // dbg(TRANSPORT_CHANNEL, "SOCKET[%u]: timeout, retransmitting %u bytes starting at %u\n", i, inFlight, socketTable[i].lastAck);
 
         sendSegment(i, TCP_DATA,
                     socketTable[i].lastAck,

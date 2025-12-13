@@ -33,6 +33,7 @@ module Node{
    uses interface IP;
    uses interface Transport;
    uses interface ChatServer;
+   uses interface ChatClient;
    uses interface Timer<TMilli> as ServerTimer;
    uses interface Timer<TMilli> as ClientTimer;
 }
@@ -63,6 +64,15 @@ implementation{
 
    socket_t appClientFd = 255;
    socket_addr_t appServerAddr;
+
+   socket_t chatClientFd = 255;
+   bool chatClientActive = FALSE;
+   bool chatHelloSent = FALSE;
+   uint8_t chatUsername[16];
+   uint8_t chatClientPort = 0;
+   socket_addr_t chatServerAddr; // always { addr=1, port=41 }
+   uint8_t chatPendingLine[64];
+   bool chatHasPending = FALSE;
 
    void makePack(pack *Package, uint16_t src, uint16_t dest, uint16_t TTL,
                  uint16_t protocol, uint16_t seq, uint8_t *payload, uint8_t length);
@@ -211,7 +221,6 @@ implementation{
        return;
      }
 
-     // subtract the amount of data you were able to write(fd, buffer, buffer len)
      {
        uint16_t valsWritten = bytesWritten / 2;
        if (valsWritten > clientValuesLeft) valsWritten = clientValuesLeft;
@@ -271,10 +280,10 @@ implementation{
                    TOS_NODE_ID, (char*)myMsg->payload, myMsg->src);
 
                memset(&reply, 0, sizeof(pack));
-               reply.src      = TOS_NODE_ID;
-               reply.dest     = myMsg->src;
-               reply.TTL      = 30;
-               reply.seq      = myMsg->seq; 
+               reply.src = TOS_NODE_ID;
+               reply.dest = myMsg->src;
+               reply.TTL = 30;
+               reply.seq = myMsg->seq; 
                reply.protocol = PROTOCOL_PINGREPLY;
                memcpy(reply.payload, myMsg->payload, PACKET_MAX_PAYLOAD_SIZE);
 
@@ -360,14 +369,13 @@ implementation{
 
     dbg(TRANSPORT_CHANNEL, "TEST SERVER EVENT\n");
 
-    // For now we just overwrite.
     serverListenFd = call Transport.socket();
     if (serverListenFd == 255) {
       dbg(TRANSPORT_CHANNEL, "TestServer: no free socket\n");
       return;
     }
 
-    // Bind to *this node* and the requested serverPort
+    // Bind to this node and the requested serverPort
     addr.addr = TOS_NODE_ID;
     addr.port = serverPort;
 
@@ -423,7 +431,6 @@ implementation{
       return;
     }
 
-    // Destination: arbitrary server node + port passed by command
     dst.addr = serverNode;
     dst.port = serverPort;
 
@@ -442,7 +449,6 @@ implementation{
     clientTransferMax = (transferCount > 0) ? (transferCount - 1) : 0;
     clientActive = TRUE;
 
-    // Start periodic sends; your ClientTimer.fired() will handle writes
     call ClientTimer.startPeriodic(100);
 
     dbg(TRANSPORT_CHANNEL,
@@ -452,38 +458,37 @@ implementation{
 
   event void CommandHandler.chatStartServer() {
     uint8_t port = 41;
-    dbg(TRANSPORT_CHANNEL,
-        "CHAT CMD: start server on port %u\n", port);
+    dbg(CHAT_CHANNEL, "CHAT CMD: start server on port %u\n", port);
     call ChatServer.start(port);
   }
 
   event void CommandHandler.chatStopServer() {
-    dbg(TRANSPORT_CHANNEL, "CHAT CMD: stop server\n");
+    dbg(CHAT_CHANNEL, "CHAT CMD: stop server\n");
     call ChatServer.stop();
   }
 
   event void CommandHandler.chatHello(uint8_t *payload) {
-    dbg(TRANSPORT_CHANNEL, "CHAT CMD: hello '%s'\n", (char*)payload);
-    call ChatServer.chatHello(payload);
+    dbg(CHAT_CHANNEL, "CHAT CMD: hello '%s'\n", (char*)payload);
+    call ChatClient.chatHello(payload);
   }
 
   event void CommandHandler.chatMsg(uint8_t *payload) {
-    dbg(TRANSPORT_CHANNEL, "CHAT CMD: msg '%s'\n", (char*)payload);
-    call ChatServer.chatMsg(payload);
+    dbg(CHAT_CHANNEL, "CHAT CMD: msg '%s'\n", (char*)payload);
+    call ChatClient.chatMsg(payload);
   }
 
   event void CommandHandler.chatWhisper(uint8_t *payload) {
-    dbg(TRANSPORT_CHANNEL, "CHAT CMD: whisper '%s'\n", (char*)payload);
-    call ChatServer.chatWhisper(payload);
+    dbg(CHAT_CHANNEL, "CHAT CMD: whisper '%s'\n", (char*)payload);
+    call ChatClient.chatWhisper(payload);
   }
 
   event void CommandHandler.chatListUsr() {
-    dbg(TRANSPORT_CHANNEL, "CHAT CMD: listusr\n");
-    call ChatServer.chatListUsr();
+    dbg(CHAT_CHANNEL, "CHAT CMD: listusr\n");
+    call ChatClient.chatListUsr();
   }
 
   event void CommandHandler.setAppServer(){
-    dbg(TRANSPORT_CHANNEL, "APP SERVER EVENT\n");
+    dbg(CHAT_CHANNEL, "APP SERVER EVENT\n");
     call ChatServer.start(41);
   }
 
@@ -493,7 +498,7 @@ implementation{
     uint8_t helloBuf[32];
     uint8_t len = 0;
 
-    dbg(TRANSPORT_CHANNEL, "APP CLIENT EVENT\n");
+    dbg(CHAT_CHANNEL, "APP CLIENT EVENT\n");
 
     // If there was an old app client socket, close it.
     if (appClientFd != 255) {
@@ -504,16 +509,16 @@ implementation{
     // Create a new socket
     appClientFd = call Transport.socket();
     if (appClientFd == 255) {
-      dbg(TRANSPORT_CHANNEL, "AppClient: no free socket\n");
+      dbg(CHAT_CHANNEL, "AppClient: no free socket\n");
       return;
     }
 
     // Bind to this node on a fixed "chat client" port (pick any not already used)
     src.addr = TOS_NODE_ID;
-    src.port = 41;   // chat client port; just avoid 40/80 used by tests
+    src.port = 81;
 
     if (call Transport.bind(appClientFd, &src) != SUCCESS) {
-      dbg(TRANSPORT_CHANNEL,
+      dbg(CHAT_CHANNEL,
           "AppClient: bind failed for fd=%u on %u:%u\n",
           appClientFd, src.addr, src.port);
       call Transport.release(appClientFd);
@@ -521,14 +526,11 @@ implementation{
       return;
     }
 
-    // Destination = chat server node and port.
-    // Make sure this matches where you start the ChatServer
-    // (CommandHandler.setAppServer uses ChatServer.start(80), so use port 80 here).
     dst.addr = 1;    // chat server node ID
-    dst.port = 80;   // chat server port
+    dst.port = 41;   // chat server port
 
     if (call Transport.connect(appClientFd, &dst) != SUCCESS) {
-      dbg(TRANSPORT_CHANNEL,
+      dbg(CHAT_CHANNEL,
           "AppClient: connect failed for fd=%u -> %u:%u\n",
           appClientFd, dst.addr, dst.port);
       call Transport.release(appClientFd);
@@ -584,7 +586,7 @@ implementation{
 
     (void)call Transport.write(appClientFd, helloBuf, len);
 
-    dbg(TRANSPORT_CHANNEL,
+    dbg(CHAT_CHANNEL,
         "AppClient: connected fd=%u src=%u:%u -> dest=%u:%u, sent HELLO (len=%u)\n",
         appClientFd, src.addr, src.port, dst.addr, dst.port, len);
   }

@@ -15,6 +15,14 @@ class TestSim:
     CMD_ROUTE_DUMP=3
     CMD_TEST_CLIENT=4
     CMD_TEST_SERVER=5
+    CMD_CHAT_START_SERVER = 7
+    CMD_CHAT_STOP_SERVER = 8
+    CMD_HELLO = 9
+    CMD_MSG = 10
+    CMD_WHISPER = 11
+    CMD_LISTUSR = 12
+    CMD_APP_SERVER = 13
+    CMD_APP_CLIENT = 14
 
     # CHANNELS - see includes/channels.h
     COMMAND_CHANNEL="command";
@@ -30,6 +38,9 @@ class TestSim:
     # Project 3
     TRANSPORT_CHANNEL="transport";
 
+    # Project 4
+    CHAT_CHANNEL="chat";
+
     # Personal Debuggin Channels for some of the additional models implemented.
     HASHMAP_CHANNEL="hashmap";
 
@@ -37,6 +48,8 @@ class TestSim:
     numMote=0
     SERVER_PORT = 80
     CLIENT_PORT = 40
+
+    CMD_PAYLOAD_MAX = 28  # CommandMsg payload size
 
     def __init__(self):
         self.t = Tossim([])
@@ -111,6 +124,7 @@ class TestSim:
 
     # Generic Command
     def sendCMD(self, ID, dest, payloadStr):
+        payloadStr = self._clamp(payloadStr)
         self.msg.set_dest(dest);
         self.msg.set_id(ID);
         self.msg.setString_payload(payloadStr)
@@ -150,6 +164,35 @@ class TestSim:
         ])
 
         self.sendCMD(self.CMD_TEST_CLIENT, clientNode, payload)
+
+
+    # ---------------- Project 4: Chat application helpers ------------------
+
+    def _clamp(self, s):
+        return s[:self.CMD_PAYLOAD_MAX - 1]
+
+    def chatStartServer(self, serverNode=1, serverPort=41):
+        payload = chr(serverPort)
+        self.sendCMD(self.CMD_CHAT_START_SERVER, serverNode, payload)
+
+    def chatStopServer(self, serverNode=1):
+        self.sendCMD(self.CMD_CHAT_STOP_SERVER, serverNode, "")
+
+    def chatHello(self, clientNode, username, clientPort):
+        line = self._clamp("hello {} {}\r\n".format(username, clientPort))
+        self.sendCMD(self.CMD_HELLO, clientNode, line)
+
+    def chatMsg(self, clientNode, message):
+        line = self._clamp("msg {}\r\n".format(message))
+        self.sendCMD(self.CMD_MSG, clientNode, line)
+
+    def chatWhisper(self, clientNode, target, message):
+        line = self._clamp("whisper {} {}\r\n".format(target, message))
+        self.sendCMD(self.CMD_WHISPER, clientNode, line)
+
+    def chatListUsr(self, clientNode):
+        line = self._clamp("listusr\r\n")
+        self.sendCMD(self.CMD_LISTUSR, clientNode, line)
 
 def main():
     s = TestSim();

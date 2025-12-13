@@ -1,7 +1,5 @@
-// lib/modules/ChatServerP.nc
-#include <Timer.h>
 #include <string.h>
-#include <stdint.h>
+#include <Timer.h>
 #include "../../includes/socket.h"
 #include "../../includes/channels.h"
 
@@ -12,36 +10,63 @@ module ChatServerP {
 }
 implementation {
 
-  // ---- constants ----
   enum {
     CHAT_MAX_CLIENTS = 8,
     CHAT_NAME_MAX = 16,
-    CHAT_MSG_MAX = 64,
+    CHAT_LINE_MAX = 80, 
     INVALID_FD = 255
   };
 
   typedef struct {
-    uint8_t inUse; 
+    uint8_t inUse;
     socket_t fd;
     char name[CHAT_NAME_MAX]; 
+    char inbuf[CHAT_LINE_MAX]; 
+    uint8_t inlen;
   } chat_client_t;
 
   static socket_t listenFd = INVALID_FD;
-  static uint8_t listenPort = 0;
   static chat_client_t clients[CHAT_MAX_CLIENTS];
 
-  // ---- helpers ----
+  // -------- small string helpers (no snprintf) --------
+
+  static void str_clear(char *s, uint8_t cap) {
+    if (cap > 0) s[0] = '\0';
+  }
+
+  static void str_cat(char *dst, uint8_t cap, const char *src) {
+    uint8_t d = 0;
+    while (d < cap && dst[d] != '\0') d++;
+    while (d + 1 < cap && *src) {
+      dst[d++] = *src++;
+    }
+    if (d < cap) dst[d] = '\0';
+  }
+
+  static void str_cat_n(char *dst, uint8_t cap, const char *src, uint8_t n) {
+    uint8_t d = 0;
+    while (d < cap && dst[d] != '\0') d++;
+    while (d + 1 < cap && n > 0 && *src) {
+      dst[d++] = *src++;
+      n--;
+    }
+    if (d < cap) dst[d] = '\0';
+  }
+
+  // -------- client table helpers --------
 
   static void resetClients() {
     uint8_t i;
     for (i = 0; i < CHAT_MAX_CLIENTS; i++) {
       clients[i].inUse = 0;
-      clients[i].fd    = INVALID_FD;
+      clients[i].fd = INVALID_FD;
       clients[i].name[0] = '\0';
+      clients[i].inlen = 0;
+      clients[i].inbuf[0] = '\0';
     }
   }
 
-  static int8_t findFreeClientSlot() {
+  static int8_t findFreeSlot() {
     uint8_t i;
     for (i = 0; i < CHAT_MAX_CLIENTS; i++) {
       if (!clients[i].inUse) return (int8_t)i;
@@ -49,316 +74,288 @@ implementation {
     return -1;
   }
 
-  static int8_t findClientByName(const char *name) {
+  static int8_t findByName(const char *name) {
     uint8_t i;
     for (i = 0; i < CHAT_MAX_CLIENTS; i++) {
-      if (clients[i].inUse &&
-          (strncmp(clients[i].name, name, CHAT_NAME_MAX) == 0)) {
-        return (int8_t)i;
+      if (clients[i].inUse && clients[i].name[0] != '\0') {
+        if (strncmp(clients[i].name, name, CHAT_NAME_MAX) == 0) return (int8_t)i;
       }
     }
     return -1;
   }
 
-  static void sendToOne(socket_t fd, const char *msg) {
-    uint16_t len = strlen(msg);
-    if (len >= CHAT_MSG_MAX) {
-      len = CHAT_MSG_MAX - 1;
-    }
-    // send as bytes (no implicit '\0' required on the wire)
-    (void)call Transport.write(fd, (uint8_t*)msg, len);
+  static void sendTo(socket_t fd, const char *s) {
+    uint16_t len = (uint16_t)strlen(s);
+    if (len == 0) return;
+    (void)call Transport.write(fd, (uint8_t*)s, len);
   }
 
-  static void broadcastToAll(const char *msg) {
+  static void broadcast(const char *s) {
     uint8_t i;
-    uint16_t len = strlen(msg);
-    if (len >= CHAT_MSG_MAX) {
-      len = CHAT_MSG_MAX - 1;
+    for (i = 0; i < CHAT_MAX_CLIENTS; i++) {
+      if (clients[i].inUse) sendTo(clients[i].fd, s);
     }
+  }
+
+  static void dropClient(uint8_t i) {
+    if (!clients[i].inUse) return;
+    dbg(CHAT_CHANNEL, "CHAT: drop fd=%u name=%s\n", clients[i].fd, clients[i].name);
+    call Transport.close(clients[i].fd);
+    clients[i].inUse = 0;
+    clients[i].fd = INVALID_FD;
+    clients[i].name[0] = '\0';
+    clients[i].inlen = 0;
+    clients[i].inbuf[0] = '\0';
+  }
+
+  // -------- parsing helpers --------
+
+  // returns index of "\r\n" start, or -1
+  static int16_t findCRLF(const char *buf, uint8_t n) {
+    uint8_t i;
+    if (n < 2) return -1;
+    for (i = 0; i + 1 < n; i++) {
+      if (buf[i] == '\r' && buf[i+1] == '\n') return (int16_t)i;
+    }
+    return -1;
+  }
+
+  // trims leading spaces
+  static char* skipSpaces(char *p) {
+    while (*p == ' ') p++;
+    return p;
+  }
+
+  // Extract first token into out (null-terminated), returns pointer after token
+  static char* readToken(char *p, char *out, uint8_t outCap) {
+    uint8_t k = 0;
+    p = skipSpaces(p);
+    while (*p && *p != ' ' && k + 1 < outCap) {
+      out[k++] = *p++;
+    }
+    out[k] = '\0';
+    return p;
+  }
+
+  // -------- command handlers (SERVER SIDE) --------
+
+  static void handleHello(uint8_t ci, char *line) {
+    // hello [username] [clientport]
+    char tok[12];
+    char name[CHAT_NAME_MAX];
+
+    line = skipSpaces(line);
+    line = readToken(line, tok, sizeof(tok)); 
+    line = readToken(line, name, sizeof(name)); 
+
+    if (name[0] == '\0') return;
+
+    strncpy(clients[ci].name, name, CHAT_NAME_MAX-1);
+    clients[ci].name[CHAT_NAME_MAX-1] = '\0';
+
+    {
+      char out[CHAT_LINE_MAX];
+      str_clear(out, sizeof(out));
+      str_cat(out, sizeof(out), clients[ci].name);
+      str_cat(out, sizeof(out), " joined\r\n");
+      broadcast(out);
+    }
+  }
+
+  static void handleMsg(uint8_t ci, char *line) {
+    // msg [message...]
+    // broadcast: "<user>: <message>\r\n"
+    char tok[8];
+    char out[CHAT_LINE_MAX];
+
+    line = readToken(line, tok, sizeof(tok));
+    line = skipSpaces(line); 
+
+    str_clear(out, sizeof(out));
+    if (clients[ci].name[0] != '\0') str_cat(out, sizeof(out), clients[ci].name);
+    else str_cat(out, sizeof(out), "anon");
+    str_cat(out, sizeof(out), ": ");
+    str_cat(out, sizeof(out), line);
+    str_cat(out, sizeof(out), "\r\n");
+    broadcast(out);
+  }
+
+  static void handleWhisper(uint8_t ci, char *line) {
+    // whisper [username] [message...]
+    char tok[10];
+    char target[CHAT_NAME_MAX];
+    char out[CHAT_LINE_MAX];
+
+    line = readToken(line, tok, sizeof(tok)); 
+    line = readToken(line, target, sizeof(target));
+    line = skipSpaces(line); 
+
+    {
+      int8_t ti = findByName(target);
+      if (ti < 0) {
+        sendTo(clients[ci].fd, "whisperRply user-not-found\r\n");
+        return;
+      }
+
+      str_clear(out, sizeof(out));
+      str_cat(out, sizeof(out), "whisper ");
+      if (clients[ci].name[0] != '\0') str_cat(out, sizeof(out), clients[ci].name);
+      else str_cat(out, sizeof(out), "anon");
+      str_cat(out, sizeof(out), ": ");
+      str_cat(out, sizeof(out), line);
+      str_cat(out, sizeof(out), "\r\n");
+
+      sendTo(clients[(uint8_t)ti].fd, out);
+    }
+  }
+
+  static void handleListUsr(uint8_t ci) {
+    // reply: listUsrRply a, b, c\r\n
+    char out[CHAT_LINE_MAX];
+    uint8_t i;
+    uint8_t first = 1;
+
+    str_clear(out, sizeof(out));
+    str_cat(out, sizeof(out), "listUsrRply ");
 
     for (i = 0; i < CHAT_MAX_CLIENTS; i++) {
-      if (clients[i].inUse) {
-        uint16_t w = call Transport.write(clients[i].fd, (uint8_t*)msg, len);
-        dbg(TRANSPORT_CHANNEL,
-            "CHAT: broadcast to fd=%u (%s), wrote=%u\n",
-            clients[i].fd, clients[i].name, w);
-      }
+      if (!clients[i].inUse) continue;
+      if (clients[i].name[0] == '\0') continue;
+
+      if (!first) str_cat(out, sizeof(out), ", ");
+      first = 0;
+      str_cat(out, sizeof(out), clients[i].name);
     }
+    str_cat(out, sizeof(out), "\r\n");
+    sendTo(clients[ci].fd, out);
   }
 
-  static void trimNewline(char *s) {
-    int16_t len = (int16_t)strlen(s);
-    while (len > 0 &&
-           (s[len-1] == '\n' || s[len-1] == '\r')) {
-      s[len-1] = '\0';
-      len--;
+  static void handleLine(uint8_t ci, char *line) {
+    // line is a null-terminated command (no \r\n)
+    char cmd[12];
+    char *p = readToken(line, cmd, sizeof(cmd));
+
+    if (strncmp(cmd, "hello", 5) == 0) handleHello(ci, line);
+    else if (strncmp(cmd, "msg", 3) == 0) handleMsg(ci, line);
+    else if (strncmp(cmd, "whisper", 7) == 0) handleWhisper(ci, line);
+    else if (strncmp(cmd, "listusr", 7) == 0) handleListUsr(ci);
+    else {
+      sendTo(clients[ci].fd, "err unknown-cmd\r\n");
     }
+    (void)p;
   }
 
-  static void handleClientInput(uint8_t ci, char *buf) {
-    // buf is null-terminated text from one TCP read
-    trimNewline(buf);
-
-    dbg(TRANSPORT_CHANNEL,
-        "CHAT: parse from client[%u] (%s): \"%s\"\n",
-        ci,
-        (clients[ci].name[0] ? clients[ci].name : "<noname>"),
-        buf);
-
-    // 1) hello [username]
-    if (!strncmp(buf, "hello ", 6)) {
-      char *name = buf + 6;
-      // skip leading spaces
-      while (*name == ' ') name++;
-      strncpy(clients[ci].name, name, CHAT_NAME_MAX - 1);
-      clients[ci].name[CHAT_NAME_MAX - 1] = '\0';
-
-      // announce join
-      {
-        char out[CHAT_MSG_MAX];
-        uint8_t pos = 0;
-        const char *pfx = "JOIN: ";
-        const char *name2 = clients[ci].name;
-        uint8_t k;
-
-        for (k = 0; pfx[k] != '\0' && pos < CHAT_MSG_MAX - 1; k++) {
-          out[pos++] = pfx[k];
-        }
-        for (k = 0; name2[k] != '\0' && pos < CHAT_MSG_MAX - 1; k++) {
-          out[pos++] = name2[k];
-        }
-        out[pos] = '\0';
-
-        broadcastToAll(out);
-      }
-      return;
-    }
-
-    // 2) msg [message...]
-    if (!strncmp(buf, "msg ", 4)) {
-      char *msg = buf + 4;
-      while (*msg == ' ') msg++;
-
-      {
-        char out[CHAT_MSG_MAX];
-        uint8_t pos = 0;
-        const char *name =
-          (clients[ci].name[0] ? clients[ci].name : "anon");
-        uint8_t k;
-
-        // "<name>: <msg>"
-        for (k = 0; name[k] != '\0' && pos < CHAT_MSG_MAX - 1; k++) {
-          out[pos++] = name[k];
-        }
-        if (pos < CHAT_MSG_MAX - 2) {
-          out[pos++] = ':';
-          out[pos++] = ' ';
-        }
-        k = 0;
-        while (msg[k] != '\0' && pos < CHAT_MSG_MAX - 1) {
-          out[pos++] = msg[k++];
-        }
-        out[pos] = '\0';
-
-        broadcastToAll(out);
-      }
-      return;
-    }
-
-    // 3) whisper [username] [message...]
-    if (!strncmp(buf, "whisper ", 8)) {
-      char *p = buf + 8;
-      char target[CHAT_NAME_MAX];
-      char message[CHAT_MSG_MAX];
-      uint8_t ti = 0, mi = 0;
-
-      // skip spaces
-      while (*p == ' ') p++;
-
-      // target
-      while (*p && *p != ' ' && ti < CHAT_NAME_MAX - 1) {
-        target[ti++] = *p++;
-      }
-      target[ti] = '\0';
-
-      // skip spaces between target and message
-      while (*p == ' ') p++;
-
-      // rest is message
-      while (*p && mi < CHAT_MSG_MAX - 1) {
-        message[mi++] = *p++;
-      }
-      message[mi] = '\0';
-
-      {
-        int8_t idx = findClientByName(target);
-        if (idx >= 0) {
-          char out[CHAT_MSG_MAX];
-          uint8_t pos = 0;
-          const char *from =
-            (clients[ci].name[0] ? clients[ci].name : "anon");
-          uint8_t k;
-
-          // "whisper from <from>: <message>"
-          const char *pfx = "whisper from ";
-          for (k = 0; pfx[k] != '\0' && pos < CHAT_MSG_MAX - 1; k++) {
-            out[pos++] = pfx[k];
-          }
-          for (k = 0; from[k] != '\0' && pos < CHAT_MSG_MAX - 1; k++) {
-            out[pos++] = from[k];
-          }
-          if (pos < CHAT_MSG_MAX - 2) {
-            out[pos++] = ':';
-            out[pos++] = ' ';
-          }
-          k = 0;
-          while (message[k] != '\0' && pos < CHAT_MSG_MAX - 1) {
-            out[pos++] = message[k++];
-          }
-          out[pos] = '\0';
-
-          sendToOne(clients[idx].fd, out);
-        } else {
-          sendToOne(clients[ci].fd, "user not found");
-        }
-      }
-      return;
-    }
-
-    // 4) listusr
-    if (!strcmp(buf, "listusr") || !strncmp(buf, "listusr ", 8)) {
-      char out[CHAT_MSG_MAX];
-      uint8_t pos = 0;
-      uint8_t j;
-
-      for (j = 0; j < CHAT_MAX_CLIENTS; j++) {
-        if (!clients[j].inUse || clients[j].name[0] == '\0') continue;
-
-        if (pos > 0 && pos < CHAT_MSG_MAX - 2) {
-          out[pos++] = ',';
-          out[pos++] = ' ';
-        }
-
-        {
-          uint8_t k = 0;
-          while (clients[j].name[k] != '\0' && pos < CHAT_MSG_MAX - 1) {
-            out[pos++] = clients[j].name[k++];
-          }
-        }
-      }
-
-      if (pos == 0) {
-        const char *msg = "no users";
-        uint8_t k = 0;
-        while (msg[k] != '\0' && pos < CHAT_MSG_MAX - 1) {
-          out[pos++] = msg[k++];
-        }
-      }
-      out[pos] = '\0';
-
-      sendToOne(clients[ci].fd, out);
-      return;
-    }
-
-    dbg(TRANSPORT_CHANNEL,
-        "CHAT: unknown command from client[%u]: \"%s\"\n", ci, buf);
-  }
-
-  // ---- Timer: accept connections + read data ----
+  // -------- timer-driven accept + read --------
 
   event void ChatTimer.fired() {
     socket_t newFd;
     uint8_t i;
 
-    if (listenFd == INVALID_FD) {
-      return;
-    }
+    if (listenFd == INVALID_FD) return;
 
-    // Accept as many pending connections as possible
+    // accept loop
     newFd = call Transport.accept(listenFd);
     while (newFd != INVALID_FD) {
-      int8_t slot = findFreeClientSlot();
+      int8_t slot = findFreeSlot();
       if (slot < 0) {
-        dbg(TRANSPORT_CHANNEL,
-            "CHAT: too many clients, closing fd=%u\n", newFd);
+        dbg(CHAT_CHANNEL, "CHAT: too many clients, closing fd=%u\n", newFd);
         call Transport.close(newFd);
       } else {
-        clients[slot].inUse = 1;
-        clients[slot].fd    = newFd;
-        clients[slot].name[0] = '\0';
-        dbg(TRANSPORT_CHANNEL,
-            "CHAT: accepted new client fd=%u (slot=%d)\n", newFd, slot);
+        clients[(uint8_t)slot].inUse = 1;
+        clients[(uint8_t)slot].fd = newFd;
+        clients[(uint8_t)slot].name[0] = '\0';
+        clients[(uint8_t)slot].inlen = 0;
+        clients[(uint8_t)slot].inbuf[0] = '\0';
+        dbg(CHAT_CHANNEL, "CHAT: accepted fd=%u slot=%d\n", newFd, slot);
       }
       newFd = call Transport.accept(listenFd);
     }
 
-    // Read from each active client
+    // read loop
     for (i = 0; i < CHAT_MAX_CLIENTS; i++) {
-      uint8_t buf[CHAT_MSG_MAX];
+      uint8_t tmp[32];
       uint16_t n;
 
-      if (!clients[i].inUse || clients[i].fd == INVALID_FD) {
-        continue;
+      if (!clients[i].inUse) continue;
+
+      n = call Transport.read(clients[i].fd, tmp, sizeof(tmp));
+      if (n == 0) continue;
+
+      // append to stream buffer
+      {
+        uint16_t k;
+        for (k = 0; k < n; k++) {
+          if (clients[i].inlen + 1 >= CHAT_LINE_MAX) {
+            // overflow -> drop
+            dropClient(i);
+            break;
+          }
+          clients[i].inbuf[clients[i].inlen++] = (char)tmp[k];
+          clients[i].inbuf[clients[i].inlen] = '\0';
+        }
+        if (!clients[i].inUse) continue;
       }
 
-      n = call Transport.read(clients[i].fd, buf, sizeof(buf) - 1);
-      if (n == 0) {
-        continue;
+      // process all complete lines
+      while (1) {
+        int16_t cut = findCRLF(clients[i].inbuf, clients[i].inlen);
+        if (cut < 0) break;
+
+        // extract line into local buffer
+        {
+          char line[CHAT_LINE_MAX];
+          uint8_t remain;
+          uint8_t j;
+
+          // copy up to cut
+          if ((uint8_t)cut >= CHAT_LINE_MAX) { dropClient(i); break; }
+          for (j = 0; j < (uint8_t)cut; j++) line[j] = clients[i].inbuf[j];
+          line[(uint8_t)cut] = '\0';
+
+          // consume cut+2 from inbuf
+          remain = clients[i].inlen - ((uint8_t)cut + 2);
+          for (j = 0; j < remain; j++) clients[i].inbuf[j] = clients[i].inbuf[(uint8_t)cut + 2 + j];
+          clients[i].inlen = remain;
+          clients[i].inbuf[clients[i].inlen] = '\0';
+
+          dbg(CHAT_CHANNEL, "CHAT: line fd=%u: \"%s\"\n", clients[i].fd, line);
+          handleLine(i, line);
+        }
       }
-
-      // ensure null-termination
-      if (n >= sizeof(buf)) {
-        n = sizeof(buf) - 1;
-      }
-      buf[n] = '\0';
-
-      dbg(TRANSPORT_CHANNEL,
-          "CHAT: received %u bytes from fd=%u\n",
-          n, clients[i].fd);
-
-      handleClientInput(i, (char*)buf);
     }
   }
 
-  // ---- ChatServer interface: start/stop + command injection ----
+  // -------- interface --------
 
   command void ChatServer.start(uint8_t port) {
     socket_addr_t addr;
 
-    if (listenFd != INVALID_FD) {
-      call ChatServer.stop();
-    }
-
-    listenPort = port;
     resetClients();
 
     listenFd = call Transport.socket();
     if (listenFd == INVALID_FD) {
-      dbg(TRANSPORT_CHANNEL, "CHAT: no socket for server\n");
+      dbg(CHAT_CHANNEL, "CHAT: no socket for listen\n");
       return;
     }
 
     addr.addr = TOS_NODE_ID;
-    addr.port = listenPort;
+    addr.port = port;
 
     if (call Transport.bind(listenFd, &addr) != SUCCESS) {
-      dbg(TRANSPORT_CHANNEL,
-          "CHAT: bind failed on %u:%u\n", addr.addr, addr.port);
+      dbg(CHAT_CHANNEL, "CHAT: bind failed port=%u\n", port);
       call Transport.release(listenFd);
       listenFd = INVALID_FD;
       return;
     }
 
     if (call Transport.listen(listenFd) != SUCCESS) {
-      dbg(TRANSPORT_CHANNEL,
-          "CHAT: listen failed on port %u\n", listenPort);
+      dbg(CHAT_CHANNEL, "CHAT: listen failed port=%u\n", port);
       call Transport.release(listenFd);
       listenFd = INVALID_FD;
       return;
     }
 
-    dbg(TRANSPORT_CHANNEL,
-        "CHAT: server listening on %u:%u (fd=%u)\n",
+    dbg(CHAT_CHANNEL, "CHAT: server listening on %u:%u (fd=%u)\n",
         addr.addr, addr.port, listenFd);
 
     call ChatTimer.startPeriodic(200);
@@ -373,112 +370,10 @@ implementation {
     }
 
     for (i = 0; i < CHAT_MAX_CLIENTS; i++) {
-      if (clients[i].inUse && clients[i].fd != INVALID_FD) {
-        call Transport.close(clients[i].fd);
-      }
+      if (clients[i].inUse) dropClient(i);
     }
-    resetClients();
+
     call ChatTimer.stop();
-
-    dbg(TRANSPORT_CHANNEL, "CHAT: server stopped\n");
+    dbg(CHAT_CHANNEL, "CHAT: server stopped\n");
   }
-
-  command void ChatServer.chatHello(uint8_t *payload) {
-    // Payload is username
-    char out[CHAT_MSG_MAX];
-    uint8_t pos = 0;
-    const char *pfx = "JOIN (cmd): ";
-    uint8_t k = 0;
-
-    while (pfx[k] != '\0' && pos < CHAT_MSG_MAX - 1) {
-      out[pos++] = pfx[k++];
-    }
-    k = 0;
-    while (payload[k] != '\0' && pos < CHAT_MSG_MAX - 1) {
-      out[pos++] = (char)payload[k++];
-    }
-    out[pos] = '\0';
-
-    broadcastToAll(out);
-  }
-
-  command void ChatServer.chatMsg(uint8_t *payload) {
-    // Just broadcast payload as a server message
-    char out[CHAT_MSG_MAX];
-    uint8_t pos = 0;
-    const char *pfx = "SERVER: ";
-    uint8_t k = 0;
-
-    while (pfx[k] != '\0' && pos < CHAT_MSG_MAX - 1) {
-      out[pos++] = pfx[k++];
-    }
-    k = 0;
-    while (payload[k] != '\0' && pos < CHAT_MSG_MAX - 1) {
-      out[pos++] = (char)payload[k++];
-    }
-    out[pos] = '\0';
-
-    broadcastToAll(out);
-  }
-
-  command void ChatServer.chatWhisper(uint8_t *payload) {
-    // payload: "targetName message..."
-    char *p = (char*)payload;
-    char target[CHAT_NAME_MAX];
-    char message[CHAT_MSG_MAX];
-    uint8_t ti = 0, mi = 0;
-
-    while (*p == ' ') p++;
-    while (*p && *p != ' ' && ti < CHAT_NAME_MAX - 1) {
-      target[ti++] = *p++;
-    }
-    target[ti] = '\0';
-
-    while (*p == ' ') p++;
-    while (*p && mi < CHAT_MSG_MAX - 1) {
-      message[mi++] = *p++;
-    }
-    message[mi] = '\0';
-
-    {
-      int8_t idx = findClientByName(target);
-      if (idx >= 0) {
-        sendToOne(clients[idx].fd, message);
-      }
-    }
-  }
-
-  command void ChatServer.chatListUsr() {
-    // Broadcast the list of users
-    char out[CHAT_MSG_MAX];
-    uint8_t pos = 0;
-    uint8_t j;
-
-    for (j = 0; j < CHAT_MAX_CLIENTS; j++) {
-      if (!clients[j].inUse || clients[j].name[0] == '\0') continue;
-
-      if (pos > 0 && pos < CHAT_MSG_MAX - 2) {
-        out[pos++] = ',';
-        out[pos++] = ' ';
-      }
-      {
-        uint8_t k = 0;
-        while (clients[j].name[k] != '\0' && pos < CHAT_MSG_MAX - 1) {
-          out[pos++] = clients[j].name[k++];
-        }
-      }
-    }
-
-    if (pos == 0) {
-      const char *msg = "no users";
-      uint8_t k = 0;
-      while (msg[k] != '\0' && pos < CHAT_MSG_MAX - 1) {
-        out[pos++] = msg[k++];
-      }
-    }
-    out[pos] = '\0';
-
-    broadcastToAll(out);
-  }
-
 }
